@@ -1,0 +1,644 @@
+{
+  "id": "go-scheduler-gmp",
+  "title": "Планировщик Go: G, M, P",
+  "domain": "Go / Планировщик",
+  "level": "L4",
+  "tags": [
+    "go",
+    "runtime",
+    "scheduler",
+    "concurrency"
+  ],
+  "prerequisites": [
+    "go-goroutine"
+  ],
+  "summary": "Планировщик Go распределяет goroutine по потокам ОС по модели G/M/P: G — goroutine, M — OS thread, P — processor, ресурс runtime, необходимый M для выполнения Go-кода. G выполняется на M, M получает работу через P. Если goroutine блокируется, runtime может переключить выполнение на другие goroutine; конкретное поведение зависит от типа блокировки или операции.",
+  "mental_model": {
+    "type": "diagram",
+    "description": "У каждого P своя очередь goroutine. M выполняет Go-код, только держа P. Ждущие goroutine не занимают ни M, ни P — кроме блокирующего syscall: там блокируется сам M, и его P передаётся другому потоку.",
+    "elements": [
+      "G (goroutine)",
+      "M (OS thread)",
+      "P (processor)",
+      "local run queue",
+      "global run queue",
+      "network poller"
+    ],
+    "relations": [
+      "P -> M: выдаёт работу",
+      "M -> G: выполняет",
+      "global run queue -> P: периодически",
+      "network poller -> local run queue: готовые G"
+    ],
+    "diagram": "          global run queue: [G][G][G]\n                    │ проверяется периодически\n       ┌────────────┴─────────────┐\n       ▼                          ▼\n  P0  runnext: G1            P1  runnext: —\n      local: [G2][G3][G4]        local: пусто\n       │                          │ steal: забирает\n       │                          │ половину у P0\n       ▼                          ▼\n  M0 (OS thread) → G0        M1 (OS thread) → G3\n\n  network poller: [G7][G8] ждут I/O — M свободны\n  syscall: M2 заблокирован вместе с G9,\n           его P передан другому M (handoff)",
+    "table": null
+  },
+  "problem": {
+    "question": "Как выполнять сотни тысяч goroutine на нескольких ядрах так, чтобы ядра не простаивали, а заблокированная goroutine не держала поток?",
+    "context": "Goroutine много, OS threads — мало. Нужен механизм, который решает, какая goroutine на каком потоке выполняется и что делать, когда она блокируется.",
+    "why_it_matters": "От планировщика зависят latency и утилизация CPU. Понимание G/M/P объясняет поведение сервиса при блокировках, нагрузке и ограничениях CPU в контейнере."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "G, M, P",
+        "description": "G — goroutine, M — OS thread, P — processor: ресурс runtime, необходимый M для выполнения Go-кода. G выполняется на M, M получает работу через P."
+      },
+      {
+        "order": 2,
+        "title": "Очереди",
+        "description": "У каждого P своя local run queue (до 256 goroutine) и слот `runnext` для только что созданной или разбуженной goroutine. Есть общая global run queue. Новая goroutine обычно попадает в `runnext` текущего P."
+      },
+      {
+        "order": 3,
+        "title": "Откуда M берёт работу",
+        "description": "M с P выбирает следующую G: `runnext` → local run queue → периодически global run queue (чтобы она не голодала) → готовые goroutine из network poller → work stealing: забирает половину очереди у другого P. Так ядра не простаивают, пока где-то есть работа."
+      },
+      {
+        "order": 4,
+        "title": "Блокировки: зависит от типа",
+        "description": "- channel, mutex, `time.Sleep`: G паркуется (waiting), M сразу берёт следующую G;\n- сетевой I/O: G паркуется в network poller (epoll/kqueue), M свободен, G вернётся в очередь, когда данные готовы;\n- блокирующий syscall или cgo: M блокируется вместе с G, а его P передаётся другому M (handoff), чтобы остальные goroutine продолжали работать."
+      },
+      {
+        "order": 5,
+        "title": "Вытеснение (preemption)",
+        "description": "Фоновый поток `sysmon` отслеживает goroutine, которые выполняются слишком долго (порядка 10 ms), и вытесняет их. С Go 1.14 вытеснение асинхронное — через сигналы, поэтому даже тесный цикл без вызовов функций не захватывает P навсегда."
+      },
+      {
+        "order": 6,
+        "title": "GOMAXPROCS = число P",
+        "description": "Число P задаёт, сколько OS threads одновременно выполняют Go-код; по умолчанию равно числу доступных CPU. Потоков M может быть больше — например, заблокированные в syscall."
+      }
+    ],
+    "key_objects": [
+      "G (goroutine)",
+      "M (OS thread)",
+      "P (processor)",
+      "local run queue",
+      "global run queue",
+      "runnext",
+      "network poller",
+      "sysmon"
+    ],
+    "important_distinctions": [
+      "P — не ядро CPU, а ресурс runtime: без P поток M не может выполнять Go-код",
+      "Поведение при блокировке зависит от её типа",
+      "Блокировка на channel/mutex/сетевом I/O не блокирует M; блокирующий syscall — блокирует, и P уходит другому M",
+      "GOMAXPROCS ограничивает число P, а не число OS threads"
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "// фрагмент тела main; импорт fmt, runtime, time\nruntime.GOMAXPROCS(1) // один P: Go-код выполняет один поток\nch := make(chan int)\ngo func() {\n\ttime.Sleep(100 * time.Millisecond)\n\tch <- 42\n}()\ngo func() {\n\tfor i := 0; i < 3; i++ {\n\t\tfmt.Println(\"работаю\", i)\n\t}\n}()\nfmt.Println(<-ch)",
+    "explanation": "P всего один, но программа не зависает: `main` паркуется на `<-ch`, первая goroutine спит, и планировщик отдаёт единственный P второй goroutine. Ожидающие goroutine не держат поток.",
+    "expected_result": "работаю 0\nработаю 1\nработаю 2\n42"
+  },
+  "details": [
+    {
+      "title": "G/M/P дословно",
+      "description": "G — goroutine. M — OS thread. P — processor, ресурс runtime, необходимый M для выполнения Go-кода. Упрощённо: G выполняется на M, M получает работу через P.",
+      "importance": "critical"
+    },
+    {
+      "title": "Блокировка goroutine ≠ блокировка потока",
+      "description": "Если goroutine блокируется на операции, runtime может переключить выполнение других goroutine; конкретное поведение зависит от типа блокировки. Channel, mutex и сетевой I/O паркуют только G; блокирующий syscall держит M, но P передаётся другому потоку.",
+      "importance": "critical"
+    },
+    {
+      "title": "Work stealing",
+      "description": "Если у P пустая очередь, его M проверяет global run queue и network poller, а затем крадёт половину очереди у случайного другого P. Это балансирует нагрузку между ядрами без центрального диспетчера.",
+      "importance": "important"
+    },
+    {
+      "title": "GOMAXPROCS в контейнере",
+      "description": "По умолчанию GOMAXPROCS равен числу CPU. До Go 1.25 runtime видел все CPU хоста и игнорировал CPU limit контейнера: при лимите 2 CPU на 64-ядерной ноде получалось 64 P, и сервис упирался в CPU throttling. Раньше это решали библиотекой `automaxprocs` или переменной `GOMAXPROCS`; с Go 1.25 runtime на Linux учитывает cgroup CPU limit.",
+      "importance": "important"
+    },
+    {
+      "title": "Асинхронная preemption с Go 1.14",
+      "description": "До Go 1.14 goroutine в тесном цикле без вызовов функций могла не отдавать P и тормозить GC и другие goroutine. Сейчас runtime вытесняет её сигналом.",
+      "importance": "secondary"
+    },
+    {
+      "title": "runtime.LockOSThread",
+      "description": "Привязывает goroutine к текущему M. Нужен для thread-local API (часть cgo-библиотек, GUI, некоторые системные вызовы). Цена — этот M не может выполнять другие goroutine.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Go-код выполняет только M, у которого есть P",
+      "why": "P — ресурс runtime, необходимый M для выполнения Go-кода."
+    },
+    {
+      "statement": "Одновременно Go-код выполняют не больше GOMAXPROCS потоков",
+      "why": "Число P равно GOMAXPROCS, а без P поток не выполняет Go-код."
+    },
+    {
+      "statement": "Goroutine в состоянии waiting (channel, mutex, сетевой I/O) не занимает ни M, ни P",
+      "why": "Runtime паркует её и отдаёт поток другим goroutine; исключение — блокирующий syscall."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "go-scheduler-gmp-fm-throttling",
+      "title": "CPU throttling из-за GOMAXPROCS в контейнере",
+      "cause": "GOMAXPROCS равен числу CPU хоста, а CPU limit контейнера меньше (актуально до Go 1.25 или при нестандартной настройке).",
+      "symptom": "Скачки p99 latency при умеренной средней загрузке CPU; в метриках контейнера — CPU throttling.",
+      "mechanism": "P больше, чем выделено CPU-квоты: все потоки быстро выбирают квоту периода, после чего контейнер простаивает до следующего периода. Запросы ждут не работы, а квоты.",
+      "fix": "Выставить GOMAXPROCS по CPU limit (переменная окружения или `automaxprocs`) либо обновить Go до версии, которая учитывает cgroup limit.",
+      "prevention": "Мониторинг throttling и проверка GOMAXPROCS при старте сервиса (лог значения)."
+    },
+    {
+      "id": "go-scheduler-gmp-fm-threads",
+      "title": "Взрыв числа OS threads на блокирующих вызовах",
+      "cause": "Много goroutine одновременно делают блокирующие syscall или cgo-вызовы.",
+      "symptom": "Растёт число потоков процесса; в крайнем случае падение `runtime: program exceeds 10000-thread limit`.",
+      "mechanism": "Каждый блокирующий вызов держит M. Чтобы остальные goroutine продолжали работать, runtime передаёт P и при необходимости создаёт новые M. Лимит потоков по умолчанию — 10 000 (`debug.SetMaxThreads`).",
+      "fix": "Ограничить конкурентность таких вызовов (семафор, worker pool), по возможности заменить блокирующий вызов неблокирующим API.",
+      "prevention": "Метрика числа потоков (`go_threads`) и явный лимит конкурентности для cgo/syscall."
+    },
+    {
+      "id": "go-scheduler-gmp-fm-contention",
+      "title": "Конкуренция за один mutex",
+      "cause": "Тысячи goroutine постоянно захватывают один общий mutex.",
+      "symptom": "Latency растёт, а CPU загружен слабо: goroutine в основном ждут.",
+      "mechanism": "Планировщик исправно выдаёт P, но goroutine сразу паркуются на mutex. Параллелизм фактически сводится к одному исполнителю.",
+      "fix": "Шардировать состояние (несколько mutex по ключу), уменьшить критическую секцию, использовать atomic или копирование.",
+      "prevention": "Mutex- и block-профили pprof под нагрузкой."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Блокировка goroutine не обязательно блокирует поток — ядра заняты другими goroutine",
+      "Переключение goroutine в user space дешевле context switch ядра",
+      "Work stealing балансирует нагрузку между ядрами без центрального диспетчера"
+    ],
+    "costs": [
+      "Нет приоритетов goroutine и привязки к ядру",
+      "Накладные расходы на планирование при огромном числе очень коротких goroutine"
+    ],
+    "risks": [
+      "Неверный GOMAXPROCS в контейнере → throttling",
+      "Блокирующие syscall/cgo → рост числа OS threads"
+    ],
+    "when_tradeoff_matters": "Latency-sensitive сервисы в контейнерах с CPU limit и сервисы с большим числом блокирующих вызовов."
+  },
+  "usage": {
+    "use_when": [
+      "Диагностика latency, когда CPU не загружен полностью",
+      "Настройка сервиса в контейнере с CPU limit",
+      "Выбор числа воркеров для CPU-bound задач (≈ GOMAXPROCS)"
+    ],
+    "avoid_when": [
+      "Не пытаться «вручную планировать» goroutine через `runtime.Gosched` и sleep — обычно это маскирует проблему синхронизации"
+    ],
+    "signals": [
+      "Высокая latency при низком CPU — goroutine ждут (locks, I/O, throttling)",
+      "Рост `go_threads` — блокирующие вызовы"
+    ],
+    "production_considerations": [
+      "Логировать GOMAXPROCS при старте",
+      "Метрики `go_goroutines`, `go_threads`, CPU throttling контейнера",
+      "`runtime/trace` для анализа задержек планирования"
+    ]
+  },
+  "comparison": [],
+  "claims": [
+    {
+      "id": "go-scheduler-gmp-claim-01",
+      "statement": "Если goroutine блокируется на операции, runtime может переключить выполнение других goroutine; конкретное поведение зависит от типа блокировки/операции.",
+      "status": "confirmed",
+      "notes": "Короткая формулировка намеренно общая; точнее — разобрать по типам: channel, сетевой I/O, syscall."
+    },
+    {
+      "id": "go-scheduler-gmp-claim-02",
+      "statement": "С Go 1.25 runtime на Linux по умолчанию учитывает CPU limit cgroup при выборе GOMAXPROCS.",
+      "status": "uncertain",
+      "notes": "Проверить по release notes используемой версии Go. Для более старых версий актуальны automaxprocs или переменная GOMAXPROCS."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "go-scheduler-gmp-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое G, M и P?",
+      "context": null,
+      "expected_answer": "G — goroutine. M — OS thread. P — processor, ресурс runtime, необходимый M для выполнения Go-кода. Упрощённо: G выполняется на M, M получает работу через P.",
+      "key_points": [
+        "G — goroutine",
+        "M — OS thread",
+        "P — ресурс runtime, нужный M для выполнения Go-кода",
+        "G выполняется на M, M получает работу через P"
+      ],
+      "common_mistakes": [
+        "Называть P физическим ядром CPU",
+        "Путать M и P"
+      ],
+      "hints": [
+        "Одна буква — задача, одна — поток, одна — право выполнять Go-код."
+      ],
+      "follow_up": "Сколько P по умолчанию и от чего это зависит?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "scheduler",
+        "recall"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-02",
+      "type": "explain",
+      "level": "L2",
+      "question": "Как работает планировщик в Go?",
+      "context": null,
+      "expected_answer": "Модель G/M/P: G — goroutine, M — OS thread, P — ресурс runtime, необходимый M для выполнения Go-кода; G выполняется на M, M получает работу через P.\n\nУ каждого P своя local run queue и слот `runnext`, есть общая global run queue. M с P берёт следующую G из своей очереди, периодически — из global, затем из network poller, а если пусто — крадёт половину очереди у другого P (work stealing). Число P = GOMAXPROCS. Долго работающие goroutine вытесняются (асинхронная preemption с Go 1.14).",
+      "key_points": [
+        "модель G/M/P",
+        "M выполняет Go-код только с P",
+        "local и global run queue",
+        "work stealing",
+        "GOMAXPROCS = число P"
+      ],
+      "common_mistakes": [
+        "«Каждая goroutine — отдельный поток»",
+        "Описывать только G/M без P"
+      ],
+      "hints": [
+        "Начни с G/M/P, затем — откуда M берёт следующую G."
+      ],
+      "follow_up": "Что происходит, когда у P закончилась работа?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "scheduler",
+        "mechanism"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "Что происходит, когда горутина блокируется?",
+      "context": null,
+      "expected_answer": "Если goroutine блокируется на операции, runtime может переключить выполнение других goroutine; конкретное поведение зависит от типа блокировки/операции.\n\nПо типам:\n- channel, mutex, `time.Sleep` — G паркуется, M сразу выполняет следующую G из очереди;\n- сетевой I/O — G паркуется в network poller, M свободен; когда данные готовы, G возвращается в очередь;\n- блокирующий syscall или cgo — M блокируется вместе с G, а P передаётся другому M (handoff), чтобы остальные goroutine продолжали работать.",
+      "key_points": [
+        "runtime переключает другие goroutine",
+        "поведение зависит от типа блокировки",
+        "channel/mutex/сеть — паркуется только G",
+        "syscall — блокируется M, P передаётся другому M"
+      ],
+      "common_mistakes": [
+        "«Блокируется весь поток и все goroutine на нём»",
+        "Не различать сетевой I/O и блокирующий syscall"
+      ],
+      "hints": [
+        "Сравни channel и блокирующий системный вызов."
+      ],
+      "follow_up": "Почему много блокирующих cgo-вызовов увеличивает число потоков?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "scheduler",
+        "blocking"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-04",
+      "type": "short_answer",
+      "level": "L3",
+      "question": "Как планировщик распределяет горутины?",
+      "context": null,
+      "expected_answer": "M получает работу через P. Новая goroutine обычно кладётся в `runnext` текущего P и в его local run queue; при переполнении часть уходит в global run queue. M выбирает G в порядке: `runnext` → local run queue → периодически global run queue → network poller → work stealing (половина очереди другого P). Так нагрузка балансируется между P без центрального диспетчера, а ядра не простаивают.",
+      "key_points": [
+        "M получает работу через P",
+        "runnext и local run queue",
+        "global run queue",
+        "work stealing"
+      ],
+      "common_mistakes": [
+        "Описывать центральную очередь, из которой все берут по очереди",
+        "Забыть про work stealing"
+      ],
+      "hints": [
+        "Что делает M, у которого пустая очередь?"
+      ],
+      "follow_up": "Зачем периодически проверять global run queue, если в local есть работа?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "scheduler"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-05",
+      "type": "explain",
+      "level": "L3",
+      "question": "Что происходит при большом количестве горутин — с точки зрения планировщика?",
+      "context": null,
+      "expected_answer": "Goroutine лёгкие, поэтому их может быть очень много. Но одновременно выполняются только GOMAXPROCS из них, остальные ждут в run queue или заблокированы. Для I/O-bound нагрузки это нормально: ждущие goroutine не занимают потоки. Для CPU-bound нагрузки лишние goroutine не ускоряют работу: растёт очередь и latency, добавляются переключения. Плюс память на стеки и работа GC по стекам. Поэтому для CPU-bound задач число воркеров ≈ GOMAXPROCS, для I/O-bound — по лимиту внешнего ресурса.",
+      "key_points": [
+        "goroutine лёгкие",
+        "параллельно выполняются только GOMAXPROCS",
+        "I/O-bound — ожидание не занимает поток",
+        "CPU-bound — очередь и latency растут",
+        "число воркеров под тип нагрузки"
+      ],
+      "common_mistakes": [
+        "Считать, что больше goroutine — всегда быстрее",
+        "Путать число goroutine и число потоков"
+      ],
+      "hints": [
+        "Сколько goroutine реально выполняются в один момент?"
+      ],
+      "follow_up": "Сколько воркеров взять для CPU-bound обработки батча?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "scheduler",
+        "scaling"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-06",
+      "type": "predict",
+      "level": "L3",
+      "question": "Что выведет программа? Сколько OS threads заняли спящие goroutine?",
+      "context": "Фрагмент тела `main`, импорт `fmt`, `runtime`, `time`.",
+      "code": "runtime.GOMAXPROCS(2)\nfor i := 0; i < 1000; i++ {\n\tgo func() { time.Sleep(time.Hour) }()\n}\ntime.Sleep(time.Second)\nfmt.Println(runtime.NumGoroutine())",
+      "code_language": "go",
+      "expected_answer": "`1001` — 1000 спящих goroutine плюс `main`. Спящие goroutine припаркованы: они не занимают ни P, ни отдельный OS thread. 1000 goroutine при двух P — нормальная ситуация, программа работает, а не ждёт 1000 потоков.",
+      "key_points": [
+        "1001 = 1000 + main",
+        "спящая goroutine паркуется",
+        "не занимает P и отдельный поток"
+      ],
+      "common_mistakes": [
+        "Ответить 1000, забыв main",
+        "Считать, что для 1000 спящих goroutine нужно 1000 потоков"
+      ],
+      "hints": [
+        "NumGoroutine считает и main."
+      ],
+      "follow_up": "А если вместо time.Sleep будет блокирующий cgo-вызов?",
+      "priority": "secondary",
+      "difficulty": 2,
+      "tags": [
+        "scheduler",
+        "predict"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-07",
+      "type": "debug",
+      "level": "L4",
+      "question": "Сервис на Go в Kubernetes с CPU limit 2 на 64-ядерной ноде. p99 latency периодически скачет, средняя загрузка CPU умеренная, в метриках контейнера — CPU throttling. Что проверишь и как исправишь?",
+      "context": "Версия Go старше 1.25, GOMAXPROCS явно не задан.",
+      "expected_answer": "Скорее всего, GOMAXPROCS = 64 (число CPU хоста), а квота — 2 CPU. 64 потока выбирают квоту периода за доли периода, дальше контейнер троттлится, и запросы ждут до следующего периода — отсюда скачки p99. Проверка: залогировать `runtime.GOMAXPROCS(0)`, сравнить с лимитом, посмотреть метрики throttling. Исправление: выставить `GOMAXPROCS` по лимиту (переменная окружения или `go.uber.org/automaxprocs`) либо обновить Go до версии, которая учитывает cgroup limit.",
+      "key_points": [
+        "GOMAXPROCS = число CPU хоста",
+        "квота исчерпывается → throttling",
+        "проверить значение GOMAXPROCS",
+        "выставить по CPU limit / automaxprocs / новый Go"
+      ],
+      "common_mistakes": [
+        "Поднимать CPU limit, не проверив GOMAXPROCS",
+        "Искать проблему только в коде обработчиков"
+      ],
+      "hints": [
+        "Сколько P создаст runtime, если видит 64 CPU?"
+      ],
+      "follow_up": "Почему throttling бьёт именно по хвостовой latency?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "scheduler",
+        "gomaxprocs",
+        "debug"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-08",
+      "type": "explain",
+      "level": "L4",
+      "question": "Были ли в вашем опыте проблемы, связанные с планировщиком?",
+      "context": "Разбери типичные проблемы, которые проявляются через планировщик, и как их диагностировать.",
+      "expected_answer": "Типичные случаи:\n- CPU throttling в контейнере из-за GOMAXPROCS больше CPU limit — скачки p99; проверка значения GOMAXPROCS, fix по лимиту;\n- goroutine leak — растёт `go_goroutines`; goroutine-профиль pprof показывает, где они висят;\n- lock contention — высокая latency при низком CPU; mutex- и block-профили;\n- блокирующие cgo/syscall — растёт `go_threads`; ограничить конкурентность таких вызовов.\n\nИнструменты: pprof (goroutine, mutex, block), `runtime/trace` (видно, сколько goroutine ждёт в очереди и когда их запускают), метрики runtime.",
+      "key_points": [
+        "GOMAXPROCS и throttling",
+        "goroutine leak",
+        "lock contention",
+        "блокирующие syscall/cgo и число потоков",
+        "pprof и runtime/trace"
+      ],
+      "common_mistakes": [
+        "Ответить «нет» без разбора типичных проблем",
+        "Сводить всё к «планировщик медленный»"
+      ],
+      "hints": [
+        "Какие симптомы видны при низкой загрузке CPU?"
+      ],
+      "follow_up": "Что показывает runtime/trace, чего не видно в CPU-профиле?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "scheduler",
+        "debug"
+      ]
+    },
+    {
+      "id": "go-scheduler-gmp-q-09",
+      "type": "decision",
+      "level": "L6",
+      "question": "CPU-bound обработка большого батча: goroutine на каждый элемент или GOMAXPROCS воркеров? Какой trade-off?",
+      "context": "Варианты:\nA) `go process(item)` на каждый элемент;\nB) пул из `runtime.GOMAXPROCS(0)` воркеров;\nC) пул из 1000 воркеров «с запасом».",
+      "expected_answer": "B. Для CPU-bound работы параллельно выполняются только GOMAXPROCS goroutine: A и C не ускоряют обработку, а добавляют память на стеки, работу GC и переключения. B загружает все P и держит память предсказуемой. A допустим при небольшом числе элементов ради простоты кода. Trade-off: чуть больше кода (пул, channel) против предсказуемых памяти и latency.",
+      "key_points": [
+        "параллельно — только GOMAXPROCS",
+        "B: воркеры ≈ GOMAXPROCS",
+        "A и C — лишняя память и переключения",
+        "A — только для малого числа элементов"
+      ],
+      "common_mistakes": [
+        "Выбирать C «на всякий случай»",
+        "Путать CPU-bound и I/O-bound рекомендации"
+      ],
+      "hints": [],
+      "follow_up": "Как изменится выбор, если обработка — это вызов внешнего API?",
+      "priority": "secondary",
+      "difficulty": 4,
+      "tags": [
+        "scheduler",
+        "tradeoff"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "go-scheduler-gmp-we-01",
+      "title": "Скачки p99 в контейнере: разбор через GOMAXPROCS",
+      "problem": "После переезда в Kubernetes у сервиса скачет p99 latency, хотя средняя загрузка CPU далека от лимита.",
+      "context": "CPU limit контейнера — 2, нода — 64 ядра, GOMAXPROCS не задан.",
+      "solution": {
+        "steps": [
+          "Симптом: скачки p99 при умеренной средней загрузке CPU; в метриках контейнера — CPU throttling.",
+          "Гипотеза: runtime видит все CPU хоста и создаёт GOMAXPROCS = 64 P.",
+          "Проверка: лог `runtime.GOMAXPROCS(0)` при старте показывает 64.",
+          "Механизм: 64 потока одновременно выполняют Go-код и выбирают квоту 2 CPU за малую часть периода CFS; остаток периода контейнер простаивает, запросы ждут.",
+          "Исправление: `GOMAXPROCS=2` в окружении или `automaxprocs`, либо обновление Go до версии с учётом cgroup limit.",
+          "Проверка результата: throttling пропал, p99 стабилизировалась — сравнить метрики до и после."
+        ],
+        "code": null
+      },
+      "why_it_works": "Число P перестаёт превышать выделенную квоту CPU: потоки не выедают квоту залпом, и запросы обслуживаются равномерно в течение периода.",
+      "alternatives": [
+        "Поднять CPU limit — дороже и не устраняет причину",
+        "Убрать CPU limit — рискованно для соседей по ноде"
+      ],
+      "tradeoffs": [
+        "Меньше P — меньше пиковый параллелизм, но предсказуемая latency"
+      ],
+      "common_mistakes": [
+        "Оптимизировать код обработчиков, не посмотрев на throttling",
+        "Выставить GOMAXPROCS больше лимита «на всякий случай»"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "go-scheduler-gmp-pr-01",
+      "type": "analysis",
+      "title": "5000 cgo-вызовов и лимит потоков",
+      "task": "Сервис для каждого запроса вызывает блокирующую C-библиотеку через cgo (вызов длится до секунды). Под пиковой нагрузкой, около 5000 одновременных запросов, число потоков процесса растёт, а иногда процесс падает с `runtime: program exceeds 10000-thread limit`. Объясни механизм и предложи исправление.",
+      "constraints": [
+        "C-библиотеку заменить нельзя",
+        "нужно сохранить пропускную способность, насколько возможно"
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Блокирующий cgo-вызов держит M вместе с goroutine. Чтобы остальные goroutine продолжали работать, runtime передаёт P другому потоку и при необходимости создаёт новый M. 5000 одновременных вызовов — тысячи потоков, а с ростом нагрузки — упор в лимит 10 000 потоков по умолчанию. Исправление: ограничить число одновременных cgo-вызовов семафором или worker pool (размер — по реальной пропускной способности библиотеки), остальные запросы ждут в очереди с таймаутом или получают быстрый отказ. `debug.SetMaxThreads` лечит симптом, а не причину.",
+        "code": "var cgoSem = make(chan struct{}, 64)\n\nfunc callLib(ctx context.Context, in Input) (Output, error) {\n\tselect {\n\tcase cgoSem <- struct{}{}:\n\tcase <-ctx.Done():\n\t\treturn Output{}, ctx.Err()\n\t}\n\tdefer func() { <-cgoSem }()\n\treturn cCall(in), nil\n}"
+      },
+      "evaluation_points": [
+        "блокирующий cgo держит M",
+        "runtime создаёт новые M, чтобы не простаивали P",
+        "лимит потоков 10 000",
+        "ограничение конкурентности семафором/пулом",
+        "таймаут ожидания слота через context"
+      ],
+      "difficulty": 4
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "go-goroutine",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "concurrency-vs-parallelism",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-mutex",
+      "relation": "related"
+    },
+    {
+      "concept_id": "profiling",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-gc",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Goroutine — сотни тысяч, ядер — восемь. Кто-то должен решать, какая goroutine выполняется сейчас, на каком потоке, и что делать, когда она ждёт.\n\nСоберём планировщик Go шаг за шагом — через проблемы, которые он решает.",
+    "beats": [
+      {
+        "problem": "Goroutine — это просто структура в памяти runtime, сама по себе она не выполняется. **Кто исполняет её код?**",
+        "solution": "Обычный поток операционной системы. Runtime держит небольшое число потоков и по очереди сажает на них goroutine. Обозначения: G — goroutine, M — OS thread (machine). G выполняется на M.",
+        "term": "G и M",
+        "analogy": "Ресторан: столики — goroutine (G), официанты — потоки (M). Столиков много, официантов несколько."
+      },
+      {
+        "problem": "Можно завести одну общую очередь goroutine на все потоки. Но тогда восемь потоков постоянно толкаются у одного замка на этой очереди. **Как раздавать работу без общей давки?**",
+        "solution": "Ввести посредника — P (processor): ресурс runtime, необходимый M для выполнения Go-кода. У каждого P своя очередь готовых goroutine. Поток выполняет Go-код, только держа P, и берёт работу из очереди своего P без общей блокировки. M получает работу через P.\n\nЧисло P задаёт `GOMAXPROCS` — по умолчанию по числу CPU.",
+        "term": "P (processor), local run queue, GOMAXPROCS",
+        "analogy": "У каждого официанта своя зона столиков (P): он обслуживает её, не спрашивая метрдотеля про каждый заказ."
+      },
+      {
+        "problem": "У одного P очередь длинная, а у другого опустела. **Второе ядро будет простаивать?**",
+        "solution": "Нет. Поток с пустой очередью сначала заглядывает в общую global run queue и проверяет, не пришли ли сетевые данные для ждущих goroutine. Если работы так и нет — крадёт половину очереди у другого P. Ядра не простаивают, пока где-то есть работа, и центральный диспетчер не нужен.",
+        "term": "work stealing",
+        "analogy": "Официант без дел подходит к занятому коллеге и забирает половину его столиков."
+      },
+      {
+        "problem": "Goroutine ждёт сообщение из channel или ответ по сети. **Поток будет стоять вместе с ней?**",
+        "solution": "Нет. Runtime откладывает (паркует) goroutine, и M сразу берёт следующую из очереди. Для сети есть отдельный механизм: goroutine ждёт в network poller (epoll/kqueue), а когда данные пришли, возвращается в очередь. Поток всё это время занят другой работой.",
+        "term": "network poller"
+      },
+      {
+        "problem": "Goroutine сделала блокирующий системный вызов — например, чтение файла — или вызов через cgo. Поток застрял в ядре, отпустить его runtime не может. **Что тогда с остальными goroutine этого P?**",
+        "solution": "Поток действительно блокируется вместе с goroutine. Но runtime забирает у него P и отдаёт другому потоку (при необходимости создаёт новый), чтобы остальные goroutine продолжали работать.\n\nПоэтому поведение при блокировке зависит от типа операции: channel, mutex и сеть паркуют только goroutine, блокирующий syscall держит поток.",
+        "term": "handoff P"
+      },
+      {
+        "problem": "Одна goroutine крутит тяжёлый цикл без единого вызова функции. **Она захватит поток навсегда, а остальные будут ждать?**",
+        "solution": "Нет. Фоновый поток runtime (sysmon) замечает goroutine, которая выполняется слишком долго (порядка 10 ms), и вытесняет её, давая поработать другим. С Go 1.14 вытеснение асинхронное — через сигнал, поэтому даже тесный цикл без вызовов не держит P бесконечно.",
+        "term": "preemption (вытеснение)"
+      },
+      {
+        "problem": "Сервис в Kubernetes с лимитом 2 CPU на 64-ядерной ноде. p99 скачет, а загрузка CPU по метрикам невысокая. **При чём тут планировщик?**",
+        "solution": "Если `GOMAXPROCS` равен числу ядер хоста, получается 64 P: runtime выполняет Go-код на десятках потоков, быстро выбирает квоту CPU, и ядро ОС тормозит контейнер до конца периода.\n\nЛечится выставлением `GOMAXPROCS` по лимиту (переменная окружения или библиотека `automaxprocs`). С Go 1.25 runtime на Linux учитывает CPU limit cgroup сам.",
+        "term": "CPU throttling"
+      },
+      {
+        "problem": "**Чем заплатили за такой планировщик?**",
+        "solution": "Нет приоритетов goroutine и привязки к ядру — порядком выполнения управлять нельзя. Блокирующие syscall и cgo плодят OS threads. При огромном числе очень коротких goroutine заметны накладные расходы на планирование.\n\nА параллельно выполняются только `GOMAXPROCS` goroutine: для CPU-bound работы лишние goroutine не ускоряют, а удлиняют очередь и latency."
+      }
+    ],
+    "outro": "**Как сказать на интервью:** G — goroutine. M — OS thread. P — processor, ресурс runtime, необходимый M для выполнения Go-кода. Упрощённо: G выполняется на M, M получает работу через P.\n\nЕсли goroutine блокируется на операции, runtime может переключить выполнение других goroutine; конкретное поведение зависит от типа блокировки/операции. Channel, mutex и сетевой I/O паркуют только goroutine; блокирующий syscall держит поток, но P передаётся другому потоку."
+  },
+  "short_answer": {
+    "junior": "Планировщик Go раскладывает много goroutine на несколько потоков ОС. Когда goroutine ждёт — например, ответа по сети, — поток не простаивает, а выполняет другую goroutine. Модель называется G/M/P: goroutine, поток ОС и ресурс runtime, без которого поток не выполняет Go-код.",
+    "middle": "Модель G/M/P: G — goroutine, M — OS thread, P — processor, ресурс runtime, необходимый M для выполнения Go-кода. Упрощённо: G выполняется на M, M получает работу через P. Если goroutine блокируется на операции, runtime может переключить выполнение других goroutine; конкретное поведение зависит от типа блокировки/операции.\n\nКак работает: у каждого P своя local run queue и слот `runnext`, есть общая global run queue. M с P берёт следующую G: `runnext` → своя очередь → периодически global → network poller → work stealing (половина очереди другого P). Число P = `GOMAXPROCS`, по умолчанию — число CPU. Долго работающие goroutine вытесняются (асинхронная preemption с Go 1.14).\n\nБлокировки по типам: channel, mutex, `time.Sleep`, сетевой I/O — паркуется только G, M берёт следующую; блокирующий syscall или cgo — M блокируется вместе с G, а P передаётся другому M (handoff).\n\nКогда важно: разбор latency при неполной загрузке CPU, настройка сервиса в контейнере с CPU limit, выбор числа воркеров.",
+    "senior": "Всё из middle, плюс:\n- GOMAXPROCS в контейнере: если он равен числу CPU хоста, а CPU limit меньше, сервис ловит CPU throttling и скачки p99. До Go 1.25 его выставляли вручную или через `automaxprocs`; с Go 1.25 runtime на Linux учитывает cgroup CPU limit. Значение GOMAXPROCS полезно логировать при старте.\n- GOMAXPROCS ограничивает число P, а не число OS threads: потоки, заблокированные в syscall или cgo, идут сверх него. Рост `go_threads` — признак массовых блокирующих вызовов; лечится лимитом конкурентности.\n- Одновременно выполняются только GOMAXPROCS goroutine: для CPU-bound работы воркеров ≈ GOMAXPROCS, лишние только удлиняют очередь; для I/O-bound — по лимиту внешнего ресурса.\n- Высокая latency при низком CPU — goroutine ждут: lock contention (mutex- и block-профили), throttling, I/O. `runtime/trace` показывает, сколько goroutine ждут в очереди и когда их запускают.\n- Приоритетов и привязки к ядру нет; `runtime.Gosched` и sleep для «ручного планирования» обычно маскируют проблему синхронизации. `runtime.LockOSThread` — только для thread-local API.\n- До Go 1.14 тесный цикл без вызовов функций мог не отдавать P и задерживать GC; сейчас работает асинхронная preemption через сигналы.",
+    "visuals": {
+      "middle": [
+        {
+          "title": "G/M/P: очереди и work stealing",
+          "mermaid": "flowchart LR\n  subgraph W0[\"M0 держит P0\"]\n    RN0[\"runnext: G1\"]\n    LQ0[\"local run queue:<br/>G2 G3 G4 G5\"]\n    RUN0[\"M0 выполняет G0\"]\n  end\n  subgraph W1[\"M1 держит P1\"]\n    LQ1[\"local run queue:<br/>пусто\"]\n    RUN1[\"M1 ищет работу\"]\n  end\n  GQ[\"global run queue:<br/>G6 G7\"]\n  NP[\"network poller:<br/>G8 ждёт сеть\"]\n  RN0 -- \"первой\" --> RUN0\n  LQ0 -- \"затем по очереди\" --> RUN0\n  LQ1 -.->|\"своя очередь пуста\"| RUN1\n  GQ -- \"потом global\" --> RUN1\n  NP -- \"потом готовые из сети\" --> RUN1\n  LQ0 -- \"в конце steal:<br/>половина очереди P0\" --> RUN1",
+          "caption": "M выполняет Go-код, только держа P; поток с пустой очередью берёт работу из global run queue и network poller, а в конце крадёт половину чужой очереди."
+        },
+        {
+          "title": "Состояния goroutine",
+          "mermaid": "stateDiagram-v2\n  state \"runnable — в очереди P\" as runnable\n  state \"running — выполняется на M с P\" as running\n  state \"waiting — channel, mutex, сеть, sleep\" as waiting\n  state \"syscall — M заблокирован вместе с G\" as syscall\n  [*] --> runnable : go f()\n  runnable --> running : планировщик выбрал\n  running --> runnable : вытеснение или Gosched\n  running --> waiting : ждёт\n  waiting --> runnable : разбудили\n  running --> syscall : блокирующий syscall или cgo\n  syscall --> running : вернулся и сразу получил P\n  syscall --> runnable : вернулся, свободного P нет\n  running --> [*] : функция вернулась",
+          "caption": "Ожидающая goroutine не занимает ни M, ни P — кроме блокирующего syscall, где вместе с ней стоит и поток."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Блокирующий syscall: handoff P",
+          "mermaid": "sequenceDiagram\n  participant G as G9\n  participant M as M2\n  participant P as P1\n  participant S as sysmon\n  participant N as M3\n  M->>G: выполняет G9, держит P1\n  G->>M: блокирующий syscall или cgo\n  Note over G,M: M2 заблокирован в ядре вместе с G9\n  S->>P: P1 застрял в syscall, а в очереди есть работа\n  P->>N: handoff: P1 передан M3\n  N->>P: выполняет остальные goroutine P1\n  M->>G: syscall вернулся\n  Note over G,S: G9 ищет свободный P, иначе встаёт в global run queue, а M2 засыпает",
+          "steps": [
+            "Поток M2 держит P1 и выполняет goroutine G9.",
+            "G9 делает блокирующий системный вызов — например, читает файл — или вызов через cgo.",
+            "Поток ушёл в ядро и заблокирован вместе с G9. Отпустить его runtime не может — в отличие от ожидания channel или сети.",
+            "Фоновый поток **sysmon** замечает, что P1 застрял в syscall, а в его очереди ждут другие goroutine.",
+            "**Handoff P**: P1 передаётся другому потоку — спящему или новому. Поэтому OS threads может быть больше, чем `GOMAXPROCS`.",
+            "M3 с P1 выполняет остальные goroutine из очереди. Приложение не стоит.",
+            "Системный вызов вернулся. Чтобы снова выполнять Go-код, G9 нужен P.",
+            "G9 берёт свободный P, если он есть, иначе встаёт в global run queue, а M2 уходит в спящие потоки. Рост `go_threads` — признак массовых блокирующих вызовов."
+          ],
+          "caption": "Блокирующий вызов держит поток, но не P, поэтому остальные goroutine продолжают работать, а потоков становится больше GOMAXPROCS."
+        }
+      ]
+    }
+  }
+}

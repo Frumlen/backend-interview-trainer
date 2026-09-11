@@ -1,0 +1,632 @@
+{
+  "id": "postgresql-explain",
+  "title": "EXPLAIN ANALYZE и план выполнения",
+  "domain": "Базы данных / Медленный запрос",
+  "level": "L3",
+  "tags": [
+    "postgresql",
+    "performance",
+    "query-plan",
+    "explain"
+  ],
+  "prerequisites": [
+    "postgresql-index"
+  ],
+  "summary": "План выполнения показывает, как PostgreSQL собирается выполнять запрос: какие таблицы и как сканирует, как соединяет и сортирует. Проверка: `EXPLAIN ANALYZE SELECT ...` — в плане смотрим Index Scan / Index Only Scan / Bitmap Index Scan или Seq Scan, количество обработанных строк, стоимость операций, JOIN и сортировки.",
+  "mental_model": {
+    "type": "tree",
+    "description": "План — дерево узлов. Листья читают таблицы (Seq Scan, Index Scan), внутренние узлы соединяют и сортируют; строки текут снизу вверх к корню.",
+    "elements": [
+      "Limit",
+      "Sort",
+      "Hash Join",
+      "Seq Scan orders",
+      "Hash",
+      "Index Scan users"
+    ],
+    "relations": [
+      "Limit -> Sort",
+      "Sort -> Hash Join",
+      "Hash Join -> Seq Scan orders: внешний вход",
+      "Hash Join -> Hash: внутренний вход",
+      "Hash -> Index Scan users"
+    ]
+  },
+  "problem": {
+    "question": "Запрос медленный, но что именно в нём медленное — чтение таблицы, соединение или сортировка? И использует ли он индекс, который вы создали?",
+    "context": "SQL декларативен: вы пишете, что нужно получить, а как это выполнить, решает планировщик. По тексту запроса не видно, какой путь он выбрал.",
+    "why_it_matters": "Без плана любые оптимизации — угадывание: можно добавить индекс, который не будет использован, и только замедлить запись."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Планировщик строит план",
+        "description": "По статистике таблиц планировщик оценивает варианты (какой scan, какой порядок и способ соединения) и выбирает план с минимальной оценочной стоимостью `cost`."
+      },
+      {
+        "order": 2,
+        "title": "EXPLAIN показывает оценку",
+        "description": "`EXPLAIN SELECT ...` выводит выбранный план с оценками: `cost`, ожидаемое число строк `rows`, ширина строки. Запрос при этом не выполняется."
+      },
+      {
+        "order": 3,
+        "title": "EXPLAIN ANALYZE показывает факт",
+        "description": "`EXPLAIN ANALYZE SELECT ...` реально выполняет запрос и добавляет к каждому узлу фактические `actual time`, `rows` и `loops`. Именно так проверяют, используется ли индекс и где тратится время."
+      },
+      {
+        "order": 4,
+        "title": "Смотрим тип сканирования",
+        "description": "Index Scan, Index Only Scan, Bitmap Index Scan — индекс используется. Seq Scan — полное чтение таблицы: нормально для маленькой таблицы или когда нужна большая доля строк, подозрительно — если из большой таблицы нужна пара строк."
+      },
+      {
+        "order": 5,
+        "title": "Ищем самый дорогой узел",
+        "description": "Сравниваем количество обработанных строк, JOIN и сортировки. `actual time` и `rows` указаны на один loop — умножайте на `loops`. Большой разрыв между оценкой `rows` и фактом означает, что планировщик ошибся со статистикой."
+      }
+    ],
+    "key_objects": [
+      "EXPLAIN",
+      "EXPLAIN ANALYZE",
+      "Seq Scan",
+      "Index Scan",
+      "Index Only Scan",
+      "Bitmap Index Scan",
+      "cost / rows / actual time / loops",
+      "BUFFERS"
+    ],
+    "important_distinctions": [
+      "Seq Scan — не всегда плохо: для маленькой таблицы или низкой селективности он дешевле индекса.",
+      "EXPLAIN — оценка без выполнения; EXPLAIN ANALYZE — реальное выполнение с фактическими цифрами.",
+      "`cost` — условные единицы планировщика, не миллисекунды; время — только в `actual time`."
+    ]
+  },
+  "minimal_example": {
+    "language": "sql",
+    "code": "EXPLAIN ANALYZE\nSELECT * FROM orders WHERE user_id = 42;\n\n-- Index Scan using orders_user_id_idx on orders\n--   (cost=0.43..12.51 rows=3 width=64)\n--   (actual time=0.018..0.024 rows=3 loops=1)\n--   Index Cond: (user_id = 42)\n-- Execution Time: 0.051 ms",
+    "explanation": "В плане узел Index Scan по индексу `orders_user_id_idx` — индекс используется. Оценка `rows=3` совпадает с фактом `rows=3`, значит статистика актуальна.",
+    "expected_result": "Index Scan using orders_user_id_idx"
+  },
+  "details": [
+    {
+      "title": "EXPLAIN ANALYZE выполняет запрос",
+      "description": "Для `UPDATE`/`DELETE`/`INSERT` данные реально изменятся. Безопасный приём:\n```sql\nBEGIN;\nEXPLAIN ANALYZE UPDATE orders SET status = 'x' WHERE id = 1;\nROLLBACK;\n```",
+      "importance": "critical"
+    },
+    {
+      "title": "Оценка против факта",
+      "description": "Если в узле `rows=1`, а `actual rows=50000`, планировщик мог выбрать неподходящий план (например, Nested Loop вместо Hash Join). Частая причина — устаревшая статистика; лечится `ANALYZE <table>`.",
+      "importance": "critical"
+    },
+    {
+      "title": "Rows Removed by Filter",
+      "description": "Строка `Rows Removed by Filter: 999988` под Seq Scan значит: прочитали почти всю таблицу, чтобы вернуть единицы строк. Сигнал, что нужен подходящий индекс или условие мешает его использовать.",
+      "importance": "important"
+    },
+    {
+      "title": "EXPLAIN (ANALYZE, BUFFERS)",
+      "description": "Показывает страницы: `shared hit` — из кэша, `read` — с диска. Помогает отличить медленный план от «холодного» кэша.",
+      "importance": "important"
+    },
+    {
+      "title": "Сортировка на диске",
+      "description": "`Sort Method: external merge  Disk: ...` — сортировке не хватило `work_mem`, она ушла на диск. Решения: индекс, дающий нужный порядок, меньше данных на сортировку, аккуратное увеличение `work_mem`.",
+      "importance": "secondary"
+    },
+    {
+      "title": "План зависит от данных",
+      "description": "На маленькой dev-базе планировщик выберет Seq Scan там, где на production будет Index Scan, и наоборот. Проверять план нужно на данных, близких к production по объёму и распределению.",
+      "importance": "important"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "EXPLAIN без ANALYZE не выполняет запрос",
+      "why": "Он только показывает выбранный план и оценки планировщика."
+    },
+    {
+      "statement": "Строки в плане текут от листьев к корню",
+      "why": "Листья читают таблицы и индексы, родительские узлы соединяют, фильтруют и сортируют полученные строки."
+    },
+    {
+      "statement": "actual time и rows в узле — на один loop",
+      "why": "Если узел выполнялся много раз (например, внутренняя сторона Nested Loop), общий объём = значение × loops."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "postgresql-explain-fm-analyze-dml",
+      "title": "EXPLAIN ANALYZE изменил данные",
+      "cause": "EXPLAIN ANALYZE запустили для UPDATE/DELETE на production без транзакции.",
+      "symptom": "Данные изменились «от диагностики».",
+      "mechanism": "ANALYZE реально выполняет запрос, включая DML.",
+      "fix": "Оборачивать в `BEGIN; ... ROLLBACK;`, диагностировать на реплике или копии.",
+      "prevention": "Правило: EXPLAIN ANALYZE для DML — только в транзакции с ROLLBACK."
+    },
+    {
+      "id": "postgresql-explain-fm-stale-stats",
+      "title": "Неверная оценка строк из-за устаревшей статистики",
+      "cause": "После массовой загрузки или удаления статистика таблицы не обновлена.",
+      "symptom": "В плане `rows=1`, а `actual rows` — десятки тысяч; выбран Nested Loop, запрос резко замедлился.",
+      "mechanism": "Планировщик выбирает план по статистике; неверная оценка кардинальности ведёт к неподходящему способу соединения и сканирования.",
+      "fix": "`ANALYZE <table>`, затем снова EXPLAIN ANALYZE.",
+      "prevention": "Следить за autovacuum/autoanalyze, запускать ANALYZE после больших загрузок."
+    },
+    {
+      "id": "postgresql-explain-fm-dev-plan",
+      "title": "План проверили не на тех данных",
+      "cause": "EXPLAIN смотрели на маленькой тестовой базе.",
+      "symptom": "Локально Seq Scan и быстро, на production тот же запрос медленный — или индекс «не используется» только локально.",
+      "mechanism": "Для маленькой таблицы Seq Scan дешевле индекса, поэтому планировщик выбирает разные планы при разном объёме данных.",
+      "fix": "Проверять план на данных, близких к production по объёму и распределению.",
+      "prevention": null
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Видно, используется ли индекс и где реально тратится время.",
+      "Фактические строки позволяют найти ошибки оценки планировщика."
+    ],
+    "costs": [
+      "EXPLAIN ANALYZE выполняет запрос целиком: тяжёлый запрос нагрузит базу ещё раз.",
+      "План надо уметь читать: без понимания узлов цифры мало что дают."
+    ],
+    "risks": [
+      "DML под EXPLAIN ANALYZE изменит данные.",
+      "Время на холодном кэше и на прогретом сильно отличается."
+    ],
+    "when_tradeoff_matters": "Когда диагностируете тяжёлый запрос на production: полезнее снять план на реплике или копии, чем повторно нагружать primary."
+  },
+  "usage": {
+    "use_when": [
+      "Проверить, используется ли индекс конкретным запросом.",
+      "Запрос стал медленным и нужно понять, какая операция дорогая.",
+      "Проверить эффект изменения: план до и после нового индекса."
+    ],
+    "avoid_when": [
+      "Запускать EXPLAIN ANALYZE тяжёлых запросов на нагруженном primary в час пик."
+    ],
+    "signals": [
+      "Seq Scan по большой таблице ради нескольких строк.",
+      "Большой Rows Removed by Filter.",
+      "Разрыв между оценкой rows и actual rows.",
+      "Sort Method: external merge."
+    ],
+    "production_considerations": [
+      "`pg_stat_statements` — найти самые дорогие запросы; `auto_explain` — автоматически логировать планы медленных запросов."
+    ]
+  },
+  "comparison": [],
+  "claims": [
+    {
+      "id": "postgresql-explain-claim-01",
+      "statement": "Для проверки индекса обычно предлагают смотреть узлы Index Scan, Index Only Scan, Bitmap Index Scan, Seq Scan.",
+      "status": "confirmed",
+      "notes": "Bitmap Index Scan в плане обычно идёт в паре с Bitmap Heap Scan: индекс даёт битовую карту страниц, затем читаются сами страницы таблицы."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "postgresql-explain-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Как проверить, используется ли индекс конкретным запросом?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Выполнить `EXPLAIN ANALYZE SELECT ...` и посмотреть узлы плана: Index Scan, Index Only Scan или Bitmap Index Scan — индекс используется; Seq Scan — таблица читается целиком.",
+      "key_points": [
+        "EXPLAIN ANALYZE",
+        "Index Scan / Index Only Scan / Bitmap Index Scan",
+        "Seq Scan — индекс не используется"
+      ],
+      "common_mistakes": [
+        "Считать, что раз индекс создан, он используется.",
+        "Смотреть только EXPLAIN без ANALYZE и принимать оценки за факт."
+      ],
+      "hints": [
+        "Какой командой смотрят план выполнения?"
+      ],
+      "follow_up": "Почему PostgreSQL может не использовать существующий индекс?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "explain",
+        "index"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-02",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Как проверите план выполнения запроса?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Через `EXPLAIN ANALYZE <запрос>`: он выполняет запрос и показывает план с фактическими временем и количеством строк по каждому узлу. `EXPLAIN` без ANALYZE показывает только оценку планировщика без выполнения; `EXPLAIN (ANALYZE, BUFFERS)` добавляет чтения из кэша и с диска. Для DML — внутри `BEGIN ... ROLLBACK`.",
+      "key_points": [
+        "EXPLAIN ANALYZE",
+        "фактическое время и строки по узлам",
+        "EXPLAIN — только оценка",
+        "DML — в транзакции с ROLLBACK"
+      ],
+      "common_mistakes": [
+        "Запустить EXPLAIN ANALYZE для DELETE на production без транзакции."
+      ],
+      "hints": [],
+      "follow_up": "Чем опасен EXPLAIN ANALYZE для UPDATE?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "explain"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "На что будете смотреть в плане?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "На тип сканирования (Seq Scan / Index Scan / Index Only Scan / Bitmap Index Scan), количество обработанных строк, стоимость операций, JOIN и сортировки. Дополнительно: какой узел занимает больше всего `actual time` (с учётом `loops`); разрыв между оценкой `rows` и фактом — признак устаревшей статистики; `Rows Removed by Filter` — прочитали много лишнего; `Sort Method: external merge` — сортировка ушла на диск; способ соединения (Nested Loop / Hash Join / Merge Join).",
+      "key_points": [
+        "тип сканирования",
+        "количество строк",
+        "стоимость операций",
+        "JOIN и сортировки",
+        "оценка vs факт rows",
+        "самый дорогой узел по actual time"
+      ],
+      "common_mistakes": [
+        "Смотреть только на итоговое Execution Time.",
+        "Принимать `cost` за миллисекунды."
+      ],
+      "hints": [
+        "Что есть в каждом узле, кроме его названия?"
+      ],
+      "follow_up": "Что значит большой разрыв между rows в оценке и actual rows?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "explain"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-04",
+      "type": "explain",
+      "level": "L2",
+      "question": "Чем EXPLAIN отличается от EXPLAIN ANALYZE и когда второй опасен?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "EXPLAIN показывает выбранный план и оценки планировщика, запрос не выполняется. EXPLAIN ANALYZE реально выполняет запрос и добавляет фактические `actual time`, `rows`, `loops`. Опасен для DML (UPDATE/DELETE/INSERT реально изменят данные) и для тяжёлых запросов на нагруженном production. Защита — `BEGIN; EXPLAIN ANALYZE ...; ROLLBACK;` или реплика/копия.",
+      "key_points": [
+        "EXPLAIN — оценка без выполнения",
+        "ANALYZE — реальное выполнение",
+        "DML изменит данные",
+        "BEGIN ... ROLLBACK"
+      ],
+      "common_mistakes": [
+        "Считать EXPLAIN ANALYZE «безопасным просмотром»."
+      ],
+      "hints": [],
+      "follow_up": null,
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "explain"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-05",
+      "type": "predict",
+      "level": "L3",
+      "question": "Таблица `orders` — 10 млн строк, есть индекс на `user_id`, у пользователя 3 заказа. Какой узел сканирования ожидаешь в плане этого запроса и что будет подозрительно?",
+      "context": null,
+      "code": "EXPLAIN ANALYZE\nSELECT * FROM orders WHERE user_id = 42;",
+      "code_language": "sql",
+      "expected_answer": "Ожидаю Index Scan (или Bitmap Index Scan + Bitmap Heap Scan) по индексу на `user_id`: условие высокоселективное, нужны 3 строки из 10 млн. Подозрительно увидеть Seq Scan: значит, индекс не подходит под условие (например, тип параметра не совпадает с типом колонки), статистика неверна или условие записано так, что индекс нельзя применить.",
+      "key_points": [
+        "Index Scan / Bitmap Index Scan",
+        "высокая селективность",
+        "Seq Scan здесь — сигнал проблемы"
+      ],
+      "common_mistakes": [
+        "Считать, что Seq Scan всегда плох — здесь он плох именно из-за селективности."
+      ],
+      "hints": [
+        "Какую долю таблицы возвращает запрос?"
+      ],
+      "follow_up": "А если у пользователя 40% всех заказов?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "explain",
+        "index",
+        "predict"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-06",
+      "type": "debug",
+      "level": "L4",
+      "question": "Запрос поиска пользователя по email выполняется 1,5 секунды, хотя индекс на `email` есть. Что происходит и как исправить?",
+      "context": "Фрагмент EXPLAIN ANALYZE:",
+      "code": "Seq Scan on users  (cost=0.00..104425.00 rows=25000 width=72)\n                  (actual time=0.031..1498.622 rows=1 loops=1)\n  Filter: (lower((email)::text) = 'x@y.com'::text)\n  Rows Removed by Filter: 4999999\nExecution Time: 1498.701 ms",
+      "code_language": "text",
+      "expected_answer": "В условии функция над колонкой: `WHERE LOWER(email) = 'x@y.com'`. Обычный индекс `ON users(email)` хранит значения `email`, а не `lower(email)`, поэтому не может помочь — идёт Seq Scan по всей таблице (`Rows Removed by Filter` почти 5 млн). Исправление — expression index: `CREATE INDEX ... ON users (LOWER(email));`, затем снова EXPLAIN ANALYZE и убедиться, что появился Index Scan.",
+      "key_points": [
+        "функция над колонкой",
+        "индекс на email не подходит под lower(email)",
+        "expression index ON users(LOWER(email))",
+        "перепроверить план"
+      ],
+      "common_mistakes": [
+        "Добавить ещё один обычный индекс на email.",
+        "Не перепроверить план после создания индекса."
+      ],
+      "hints": [
+        "Посмотри на строку Filter."
+      ],
+      "follow_up": "Какие ещё условия мешают использовать индекс?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "explain",
+        "debug",
+        "expression-index"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-07",
+      "type": "debug",
+      "level": "L4",
+      "question": "После ночной массовой загрузки отчёт стал выполняться в 50 раз медленнее. Что видно в плане и что делать?",
+      "context": "Фрагмент EXPLAIN ANALYZE:",
+      "code": "Nested Loop  (cost=0.86..16.91 rows=1 width=48)\n             (actual time=0.052..9812.330 rows=48210 loops=1)\n  ->  Index Scan using events_day_idx on events e ...\n        (rows=1) (actual rows=48210 loops=1)\n  ->  Index Scan using users_pkey on users u ...\n        (actual rows=1 loops=48210)",
+      "code_language": "text",
+      "expected_answer": "Планировщик ожидал 1 строку (`rows=1`), а получил 48 210 — оценка неверна, скорее всего из-за устаревшей статистики после загрузки. Из-за этого выбран Nested Loop: внутренний Index Scan выполнился 48 210 раз (`loops=48210`). Исправление: `ANALYZE events;` (и проверить autovacuum/autoanalyze), затем снова EXPLAIN ANALYZE — ожидаем Hash Join или другой план с верной оценкой.",
+      "key_points": [
+        "оценка rows=1 против факта 48210",
+        "устаревшая статистика",
+        "loops умножают стоимость внутреннего узла",
+        "ANALYZE таблицы"
+      ],
+      "common_mistakes": [
+        "Сразу добавлять индексы, не посмотрев на оценку строк.",
+        "Смотреть на actual time внутреннего узла без учёта loops."
+      ],
+      "hints": [
+        "Сравни rows в оценке и actual rows."
+      ],
+      "follow_up": "Почему при большом числе строк Hash Join выгоднее Nested Loop?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "explain",
+        "statistics",
+        "debug"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-08",
+      "type": "decision",
+      "level": "L6",
+      "question": "В плане отчёта Seq Scan по таблице `orders`. Коллега предлагает добавить индекс на колонку фильтра. Добавлять?",
+      "context": "Условие `WHERE status IN ('paid', 'shipped')` возвращает около 40% строк таблицы. Варианты:\nA) добавить индекс на `status`;\nB) оставить Seq Scan и уменьшить объём работы (нужные колонки, период, предагрегация);\nC) добавить индекс и принудительно отключить Seq Scan.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "B. При низкой селективности (запрос возвращает большую долю таблицы) индекс не даёт выигрыша: Seq Scan последовательно читает страницы дешевле, чем индекс с переходами в таблицу за каждой строкой. Поэтому планировщик и выбирает Seq Scan. Индекс (A) только замедлит INSERT/UPDATE и займёт место, а принудительное отключение Seq Scan (C) ухудшит план. Главный trade-off: вместо индекса уменьшаем объём читаемых данных.",
+      "key_points": [
+        "низкая селективность",
+        "Seq Scan дешевле при большой доле строк",
+        "индексы удорожают запись",
+        "уменьшить объём данных"
+      ],
+      "common_mistakes": [
+        "Считать любой Seq Scan ошибкой.",
+        "Отключать Seq Scan настройками планировщика в production."
+      ],
+      "hints": [
+        "Какую долю таблицы возвращает условие?"
+      ],
+      "follow_up": "Как partial index мог бы помочь, если бы нужны были только редкие статусы?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "explain",
+        "decision",
+        "selectivity"
+      ]
+    },
+    {
+      "id": "postgresql-explain-q-09",
+      "type": "explain",
+      "level": "L2",
+      "question": "Чем отличаются Index Scan, Index Only Scan и Bitmap Index Scan?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Index Scan идёт по индексу и за каждой найденной строкой обращается в таблицу. Index Only Scan берёт все нужные колонки прямо из индекса, почти не обращаясь к таблице (работает, если страницы помечены как all-visible в visibility map). Bitmap Index Scan собирает по индексу битовую карту страниц, затем Bitmap Heap Scan читает эти страницы по порядку — удобно, когда строк средне много или комбинируются несколько индексов.",
+      "key_points": [
+        "Index Scan: индекс + таблица за каждой строкой",
+        "Index Only Scan: данные из индекса",
+        "Bitmap: карта страниц, затем чтение таблицы"
+      ],
+      "common_mistakes": [
+        "Считать Index Only Scan гарантированным при покрывающем индексе — он зависит от visibility map (VACUUM)."
+      ],
+      "hints": [],
+      "follow_up": "Как сделать индекс покрывающим?",
+      "priority": "secondary",
+      "difficulty": 3,
+      "tags": [
+        "explain",
+        "index"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "postgresql-explain-we-01",
+      "title": "Читаем план медленного запроса",
+      "problem": "Страница «последние заказы пользователя» грузится 800 мс. Разобрать план и найти, что дорого.",
+      "context": "Запрос: `SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20;` Индекс есть только на `created_at`.",
+      "solution": {
+        "steps": [
+          "Запустить `EXPLAIN (ANALYZE, BUFFERS)` с реальным `user_id`.",
+          "Найти листья: например, `Index Scan Backward using orders_created_at_idx` с `Filter: (user_id = 42)` и огромным `Rows Removed by Filter` — PostgreSQL идёт по всем заказам в порядке даты и отбрасывает чужие.",
+          "Сравнить оценку и факт `rows`: оценка сильно ошибается — планировщик рассчитывал быстро набрать 20 строк, а у пользователя заказы редкие.",
+          "Вывод: индекс на `created_at` даёт порядок, но не фильтрует по пользователю.",
+          "Исправление: составной индекс `(user_id, created_at)` — он и фильтрует по пользователю, и отдаёт строки уже в нужном порядке, поэтому сортировка не нужна.",
+          "Проверка: новый EXPLAIN ANALYZE — Index Scan по `(user_id, created_at)`, строк прочитано ≈ 20, время — единицы миллисекунд."
+        ],
+        "code": "CREATE INDEX CONCURRENTLY orders_user_created_idx\n    ON orders (user_id, created_at);"
+      },
+      "why_it_works": "Составной индекс, где сначала колонка равенства, а потом колонка сортировки, позволяет найти строки пользователя и прочитать их уже упорядоченными; LIMIT останавливает чтение после 20 строк.",
+      "alternatives": [
+        "Отдельный индекс на `user_id` + сортировка в памяти — нормально, если у пользователя мало заказов."
+      ],
+      "tradeoffs": [
+        "Ещё один индекс — дороже INSERT/UPDATE и больше места."
+      ],
+      "common_mistakes": [
+        "Смотреть только на Execution Time, не на Rows Removed by Filter.",
+        "Поменять порядок колонок: `(created_at, user_id)` не решит задачу."
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "postgresql-explain-pr-01",
+      "type": "analysis",
+      "title": "Найди проблему по плану",
+      "task": "Разбери план и назови: какой узел дорогой, почему, что исправить.\n```text\nSort  (actual time=2210..2390 rows=120000 loops=1)\n  Sort Key: created_at DESC\n  Sort Method: external merge  Disk: 18432kB\n  ->  Seq Scan on events  (actual time=0.02..1690 rows=120000 loops=1)\n        Filter: (account_id = 7)\n        Rows Removed by Filter: 9880000\n```",
+      "constraints": [
+        "Приложению нужны только последние 50 событий аккаунта."
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "1) Seq Scan читает 10 млн строк ради 120 тыс. (`Rows Removed by Filter`) — нет подходящего индекса на `account_id`.\n2) Сортировка 120 тыс. строк ушла на диск (`external merge`) — не хватило `work_mem`.\n3) При этом приложению нужны 50 строк, а запрос сортирует все.\nИсправление: `LIMIT 50` и составной индекс `(account_id, created_at)` — поиск по аккаунту и готовый порядок, без Sort. Проверить новым EXPLAIN ANALYZE.",
+        "code": "CREATE INDEX CONCURRENTLY events_account_created_idx\n    ON events (account_id, created_at);\n\nSELECT * FROM events\nWHERE account_id = 7\nORDER BY created_at DESC\nLIMIT 50;"
+      },
+      "evaluation_points": [
+        "Заметил Rows Removed by Filter",
+        "Заметил сортировку на диске",
+        "Предложил LIMIT",
+        "Составной индекс в правильном порядке колонок",
+        "Проверка новым планом"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "postgresql-index",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "postgresql-index-not-used",
+      "relation": "next"
+    },
+    {
+      "concept_id": "postgresql-slow-query",
+      "relation": "next"
+    },
+    {
+      "concept_id": "postgresql-composite-index",
+      "relation": "related"
+    },
+    {
+      "concept_id": "sql-join",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Запрос выполняется 2 секунды. По тексту SQL не видно почему: вы написали, что хотите получить, а как это сделать, решила база.\n\nРазберёмся, как подсмотреть её решение и найти в нём медленное место.",
+    "beats": [
+      {
+        "problem": "Один и тот же SELECT можно выполнить десятком способов: прочитать таблицу целиком или через индекс, соединить таблицы тем или иным алгоритмом, в разном порядке. **Кто выбирает способ?**",
+        "solution": "Планировщик. Он перебирает варианты, по статистике оценивает стоимость каждого и выбирает самый дешёвый.\n\nРезультат — дерево операций: внизу чтение таблиц, выше соединения, сортировки, LIMIT.",
+        "term": "планировщик; план выполнения",
+        "analogy": "Навигатор: вы задаёте точку назначения, а маршрут он строит сам по данным о пробках."
+      },
+      {
+        "problem": "**Как увидеть, какой маршрут выбран?**",
+        "solution": "Написать `EXPLAIN` перед запросом. База покажет дерево плана с оценками: `cost` — условная стоимость, `rows` — сколько строк ожидается.\n\nСам запрос при этом не выполняется — это только прогноз.",
+        "term": "EXPLAIN; cost"
+      },
+      {
+        "problem": "Прогноз может ошибаться: планировщик ждал 10 строк, а их миллион. **Как узнать, что было на самом деле?**",
+        "solution": "`EXPLAIN ANALYZE` реально выполняет запрос и у каждой операции пишет факт: `actual time` — время в миллисекундах, `rows` — сколько строк реально прошло, `loops` — сколько раз операция запускалась.\n\nТеперь прогноз и факт стоят рядом.",
+        "term": "EXPLAIN ANALYZE",
+        "analogy": "Навигатор обещал 20 минут, а поездка заняла час: сравнив по участкам, видишь, где была пробка."
+      },
+      {
+        "problem": "План перед глазами. **Используется ли наш индекс?**",
+        "solution": "Смотрим на узлы чтения таблиц. Index Scan, Index Only Scan, Bitmap Index Scan — индекс в деле. Seq Scan — таблица читается целиком.\n\nДля маленькой таблицы или когда нужна большая часть строк Seq Scan — это нормально. Подозрительно, если из большой таблицы нужна пара строк, а рядом `Rows Removed by Filter: 999988`: прочитали миллион строк, чтобы выбросить почти все.",
+        "term": "Seq Scan / Index Scan / Index Only Scan / Bitmap Index Scan"
+      },
+      {
+        "problem": "В плане десяток узлов. **Где именно уходит время?**",
+        "solution": "Ищем узел с самым большим `actual time`. Время и строки в узле указаны на один запуск, их умножают на `loops`: 0,05 мс выглядит мелочью, но при `loops=48210` это уже больше двух секунд.\n\nОтдельно смотрим на JOIN и сортировки: `Sort Method: external merge  Disk: …` значит, что сортировке не хватило памяти и она ушла на диск.",
+        "term": "loops"
+      },
+      {
+        "problem": "Узел ждал `rows=1`, а получил 48 210 строк. **Почему это важно, если запрос всё равно отработал?**",
+        "solution": "Под одну строку планировщик выбрал Nested Loop: для каждой строки снаружи — поиск внутри. Для одной строки это идеально, для 48 тысяч — очень медленно.\n\nБольшой разрыв между оценкой и фактом — главный признак, что план выбран по неверным данным. Частая причина — устаревшая статистика, лечится `ANALYZE <таблица>`.",
+        "term": "ошибка оценки строк"
+      },
+      {
+        "problem": "Запрос медленный только в первый раз, потом быстрый. **Виноват план или кэш?**",
+        "solution": "`EXPLAIN (ANALYZE, BUFFERS)` добавляет счётчики страниц: `shared hit` — прочитано из кэша, `read` — с диска. Если в медленном запуске много `read`, а в быстром одни `hit`, план тот же — разница в прогреве кэша.",
+        "term": "BUFFERS"
+      },
+      {
+        "problem": "**Чем платим за точные цифры?**",
+        "solution": "`EXPLAIN ANALYZE` выполняет запрос по-настоящему. Тяжёлый отчёт второй раз нагрузит базу, а `UPDATE` или `DELETE` реально изменят данные — поэтому их проверяют внутри `BEGIN; … ROLLBACK;`.\n\nИ план зависит от данных: на маленькой dev-базе он будет не таким, как на production.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Смотрю медленные запросы и `EXPLAIN ANALYZE`, анализирую план, количество читаемых строк и стоимость операций. Чтобы проверить индекс, выполняю `EXPLAIN ANALYZE SELECT ...` и смотрю узлы: Index Scan, Index Only Scan, Bitmap Index Scan или Seq Scan.\n\nВ плане смотрю тип сканирования, количество обработанных строк, стоимость операций, JOIN и сортировки. Большой разрыв между оценкой `rows` и фактом — признак устаревшей статистики."
+  },
+  "short_answer": {
+    "junior": "План выполнения показывает, как PostgreSQL выполняет запрос: читает таблицу целиком или по индексу, как соединяет таблицы и сортирует. Посмотреть его можно командой `EXPLAIN ANALYZE SELECT ...`. Index Scan в плане — индекс используется, Seq Scan — таблица читается целиком.",
+    "middle": "План выполнения показывает, как PostgreSQL собирается выполнять запрос: какие таблицы и как сканирует, как соединяет и сортирует. Проверка — `EXPLAIN ANALYZE SELECT ...`: смотрю Index Scan / Index Only Scan / Bitmap Index Scan или Seq Scan, количество обработанных строк, стоимость операций, JOIN и сортировки.\n\nКак работает: `EXPLAIN` показывает только оценку планировщика (`cost`, ожидаемые `rows`), запрос не выполняется. `EXPLAIN ANALYZE` реально выполняет запрос и добавляет факт по каждому узлу: `actual time`, `rows`, `loops`.\n\nНа что смотреть: самый дорогой узел (время и строки указаны на один loop — умножать на `loops`); разрыв между оценкой `rows` и фактом — устаревшая статистика; `Rows Removed by Filter` — прочитано много лишнего; `Sort Method: external merge` — сортировка ушла на диск.",
+    "senior": "Всё из middle, плюс:\n- `EXPLAIN ANALYZE` выполняет запрос: DML реально изменит данные — проверять внутри `BEGIN; … ROLLBACK;`. Тяжёлый запрос повторно нагрузит primary, поэтому план лучше снимать на реплике или копии.\n- `cost` — условные единицы планировщика, не миллисекунды; время есть только в `actual time`. Первое число cost — стоимость до первой строки, второе — до последней; для запросов с LIMIT важно первое.\n- `EXPLAIN (ANALYZE, BUFFERS)` показывает `shared hit` / `read` и отличает плохой план от холодного кэша. Сам замер времени тоже стоит ресурсов: при множестве мелких узлов `TIMING OFF` уменьшает искажения.\n- Ошибка оценки числа строк ломает не только выбор индекса, но и способ соединения: при `rows=1` вместо тысяч выбирается Nested Loop с огромным `loops`.\n- Bitmap Index Scan идёт в паре с Bitmap Heap Scan. Если в `Heap Blocks` появились lossy-страницы, битовая карта не поместилась в `work_mem`, и строки на этих страницах перепроверяются по условию (`Rows Removed by Index Recheck`).\n- План зависит от объёма и распределения данных, поэтому проверяют на данных, близких к production. На production медленные планы собирают автоматически через `auto_explain`.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "План — дерево узлов",
+          "mermaid": "flowchart BT\n  IU[\"Index Scan on users<br/>country = 'RU'\"] --> HA[\"Hash<br/>хеш-таблица в памяти\"]\n  HA --> HJ[\"Hash Join<br/>o.user_id = u.id\"]\n  SO[\"Seq Scan on orders<br/>вся таблица\"] --> HJ\n  HJ --> SR[\"Sort по created_at<br/>корень плана\"]",
+          "caption": "Нижние узлы читают таблицы, строки поднимаются вверх через соединение и сортировку к корню плана."
+        }
+      ],
+      "middle": [
+        {
+          "title": "EXPLAIN оценивает, EXPLAIN ANALYZE выполняет",
+          "mermaid": "sequenceDiagram\n  participant U as Разработчик\n  participant P as Планировщик\n  participant E as Исполнитель\n  participant D as Данные\n  U->>P: EXPLAIN SELECT ...\n  P->>P: оценка по статистике — cost и rows\n  P-->>U: план с оценками, запрос не выполнялся\n  U->>P: EXPLAIN ANALYZE SELECT ...\n  P->>E: выполнить этот план\n  E->>D: реально читает строки\n  Note over E: замеряет каждый узел — actual time, rows, loops\n  E-->>U: план с оценкой и фактом, строки результата отброшены",
+          "steps": [
+            "`EXPLAIN` без ANALYZE просит только план.",
+            "Планировщик прикидывает по статистике стоимость (`cost`, условные единицы) и ожидаемое число строк (`rows`).",
+            "Возвращается план с оценками. Запрос не выполнялся — это прогноз, и он может ошибаться.",
+            "`EXPLAIN ANALYZE` просит план **и** выполнение.",
+            "Исполнитель получает план и запускает его по-настоящему.",
+            "Данные реально читаются. Поэтому тяжёлый запрос нагрузит базу, а UPDATE/DELETE реально изменят данные.",
+            "По каждому узлу записывается факт: время (`actual time`), строки (`rows`) и сколько раз узел запускался (`loops`). Время и строки — на один запуск.",
+            "В ответе план с оценкой и фактом рядом. Сами строки результата не выводятся."
+          ],
+          "caption": "Сравнение ожидаемых rows с actual rows — главный способ увидеть, где планировщик ошибся."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Ошибка оценки строк ломает выбор соединения",
+          "mermaid": "flowchart TD\n  A[\"Статистика устарела\"] --> B[\"Оценка узла: rows=1\"]\n  B --> C[\"Планировщик выбирает Nested Loop\"]\n  C --> D[\"Факт: 48 210 внешних строк\"]\n  D --> E[\"Внутренний Index Scan<br/>выполнен 48 210 раз (loops)\"]\n  E --> F[\"Запрос резко замедляется\"]\n  F -.->|\"ANALYZE, верная оценка\"| G[\"Hash Join:<br/>каждая таблица читается один раз\"]",
+          "caption": "Разрыв между rows и actual rows ищут в плане снизу вверх: ошибка в нижнем узле тянет за собой неверные решения выше."
+        }
+      ]
+    }
+  }
+}

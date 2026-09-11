@@ -1,0 +1,209 @@
+{
+  "terms": [
+    {
+      "term": "индекс",
+      "aliases": [
+        "index"
+      ],
+      "definition": "Отдельная структура рядом с таблицей, по которой строки находятся по условию без чтения всей таблицы. Ускоряет чтение, но занимает место и удорожает запись.",
+      "concept_id": "postgresql-index"
+    },
+    {
+      "term": "B-tree",
+      "aliases": [
+        "B-дерево",
+        "btree"
+      ],
+      "definition": "Тип индекса по умолчанию в PostgreSQL: сбалансированное дерево отсортированных ключей. Ускоряет равенство, диапазоны и сортировку.",
+      "concept_id": "postgresql-index-types"
+    },
+    {
+      "term": "Hash-индекс",
+      "aliases": [
+        "Hash index",
+        "хеш-индекс"
+      ],
+      "definition": "Индекс, который раскладывает ключи по значению хеш-функции. Поддерживает только `=`, без диапазонов и сортировки.",
+      "concept_id": "postgresql-index-types"
+    },
+    {
+      "term": "GIN",
+      "aliases": [
+        "Generalized Inverted Index",
+        "инвертированный индекс"
+      ],
+      "definition": "Инвертированный индекс: для каждого элемента (ключа JSONB, элемента массива, слова) хранит список строк, где он встречается. Быстро ищет «содержит», но дорог на запись.",
+      "concept_id": "postgresql-index-types"
+    },
+    {
+      "term": "GiST",
+      "aliases": [
+        "Generalized Search Tree"
+      ],
+      "definition": "Дерево, где узел хранит «рамку», охватывающую всё ниже. Используется для геоданных, пересечения диапазонов и поиска ближайших соседей.",
+      "concept_id": "postgresql-index-types"
+    },
+    {
+      "term": "BRIN",
+      "aliases": [
+        "Block Range Index"
+      ],
+      "definition": "Крошечный индекс, который хранит min/max для каждого диапазона блоков таблицы. Полезен, только если значения идут в физическом порядке строк, например время вставки.",
+      "concept_id": "postgresql-index-types"
+    },
+    {
+      "term": "Seq Scan",
+      "aliases": [
+        "Sequential Scan",
+        "последовательное сканирование"
+      ],
+      "definition": "Узел плана, который читает всю таблицу подряд и проверяет условие у каждой строки.",
+      "concept_id": "postgresql-index"
+    },
+    {
+      "term": "Index Scan",
+      "aliases": [],
+      "definition": "Узел плана: находит ключи в индексе и за каждой найденной записью читает строку из таблицы.",
+      "concept_id": "postgresql-index"
+    },
+    {
+      "term": "Index Only Scan",
+      "aliases": [],
+      "definition": "Узел плана, который берёт все нужные колонки прямо из индекса и почти не обращается к таблице.",
+      "concept_id": "postgresql-index"
+    },
+    {
+      "term": "Bitmap Index Scan",
+      "aliases": [
+        "Bitmap Heap Scan",
+        "bitmap scan"
+      ],
+      "definition": "Двухшаговое чтение: по индексу собирается карта нужных страниц, затем Bitmap Heap Scan читает эти страницы по порядку. Выбирается, когда совпадений много.",
+      "concept_id": "postgresql-explain"
+    },
+    {
+      "term": "селективность",
+      "aliases": [
+        "selectivity"
+      ],
+      "definition": "Какую долю таблицы возвращает условие. Высокая селективность — мало строк, и индекс выгоден; низкая — много строк, и выгоднее Seq Scan.",
+      "concept_id": "postgresql-index-not-used"
+    },
+    {
+      "term": "планировщик",
+      "aliases": [
+        "planner",
+        "query planner",
+        "оптимизатор"
+      ],
+      "definition": "Часть PostgreSQL, которая по статистике оценивает стоимость вариантов выполнения запроса и выбирает самый дешёвый план.",
+      "concept_id": "postgresql-explain"
+    },
+    {
+      "term": "EXPLAIN",
+      "aliases": [],
+      "definition": "Команда, которая показывает выбранный план запроса с оценками планировщика (`cost`, ожидаемые `rows`). Сам запрос не выполняется.",
+      "concept_id": "postgresql-explain"
+    },
+    {
+      "term": "EXPLAIN ANALYZE",
+      "aliases": [],
+      "definition": "EXPLAIN, который реально выполняет запрос и добавляет фактические `actual time`, `rows` и `loops` по каждому узлу. DML при этом действительно меняет данные.",
+      "concept_id": "postgresql-explain"
+    },
+    {
+      "term": "статистика",
+      "aliases": [
+        "статистик",
+        "statistics",
+        "ANALYZE",
+        "pg_stats"
+      ],
+      "definition": "Сохранённые сведения о данных таблицы (число различных значений, самые частые значения, распределение), по которым планировщик оценивает число строк. Обновляется командой `ANALYZE` и autovacuum.",
+      "concept_id": "postgresql-index-not-used"
+    },
+    {
+      "term": "составной индекс",
+      "aliases": [
+        "composite index",
+        "multicolumn index",
+        "составном индексе",
+        "составного индекса"
+      ],
+      "definition": "Индекс по нескольким колонкам: ключи отсортированы по первой колонке, затем по второй. Эффективен только для условий с ведущей колонкой.",
+      "concept_id": "postgresql-composite-index"
+    },
+    {
+      "term": "expression index",
+      "aliases": [
+        "индекс по выражению",
+        "functional index"
+      ],
+      "definition": "Индекс по результату выражения, например `LOWER(email)`. Помогает запросам, где в условии стоит ровно это выражение.",
+      "concept_id": "postgresql-index-not-used"
+    },
+    {
+      "term": "partial index",
+      "aliases": [
+        "частичный индекс"
+      ],
+      "definition": "Индекс только по строкам, которые подходят под условие `WHERE`, например `status = 'pending'`. Маленький и дешёвый, но помогает только запросам с тем же условием.",
+      "concept_id": "postgresql-index"
+    },
+    {
+      "term": "covering index",
+      "aliases": [
+        "покрывающий индекс"
+      ],
+      "definition": "Индекс, в котором есть все колонки, нужные запросу, — поэтому возможен Index Only Scan. Неключевые колонки добавляют через `INCLUDE`.",
+      "concept_id": "postgresql-composite-index"
+    },
+    {
+      "term": "cardinality",
+      "aliases": [
+        "кардинальность"
+      ],
+      "definition": "Число строк на выходе операции или число различных значений в колонке. От оценки кардинальности зависит выбор индекса и алгоритма JOIN.",
+      "concept_id": "sql-join"
+    },
+    {
+      "term": "JOIN",
+      "aliases": [
+        "INNER JOIN",
+        "LEFT JOIN",
+        "соединение таблиц"
+      ],
+      "definition": "Соединение строк нескольких таблиц по условию. INNER оставляет только пары, LEFT — ещё и строки левой таблицы без пары (с NULL справа).",
+      "concept_id": "sql-join"
+    },
+    {
+      "term": "Nested Loop",
+      "aliases": [
+        "Nested Loop Join"
+      ],
+      "definition": "Алгоритм JOIN: для каждой строки внешней стороны ищет пары во внутренней. Хорош, когда снаружи мало строк, а внутри есть индекс.",
+      "concept_id": "sql-join"
+    },
+    {
+      "term": "Hash Join",
+      "aliases": [],
+      "definition": "Алгоритм JOIN: строит хеш-таблицу по меньшей стороне и один проход делает по большей. Работает только для условия равенства.",
+      "concept_id": "sql-join"
+    },
+    {
+      "term": "Merge Join",
+      "aliases": [],
+      "definition": "Алгоритм JOIN: сливает две стороны, отсортированные по ключу соединения (индексом или сортировкой).",
+      "concept_id": "sql-join"
+    },
+    {
+      "term": "Cartesian product",
+      "aliases": [
+        "декартово произведение",
+        "CROSS JOIN"
+      ],
+      "definition": "Все комбинации строк двух таблиц: N × M строк. Намеренно — CROSS JOIN, по ошибке — при забытом или всегда истинном условии соединения.",
+      "concept_id": "sql-join"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "relations": [
+    {
+      "from": "cpython-gc",
+      "to": "go-gc",
+      "type": "contrasts_with"
+    },
+    {
+      "from": "go-stack-vs-heap",
+      "to": "go-gc",
+      "type": "related"
+    },
+    {
+      "from": "profiling",
+      "to": "go-gc",
+      "type": "related"
+    },
+    {
+      "from": "profiling",
+      "to": "go-scheduler-gmp",
+      "type": "related"
+    },
+    {
+      "from": "go-goroutine",
+      "to": "go-scheduler-gmp",
+      "type": "part_of"
+    },
+    {
+      "from": "go-goroutine",
+      "to": "go-stack-vs-heap",
+      "type": "related"
+    },
+    {
+      "from": "go-scheduler-gmp",
+      "to": "go-channel",
+      "type": "related"
+    },
+    {
+      "from": "go-goroutine",
+      "to": "concurrency-vs-parallelism",
+      "type": "related"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-go-runtime",
+      "title": "Go Runtime: память, GC, планировщик",
+      "description": "Escape analysis, диагностика GC и latency, goroutine и планировщик G/M/P, профилирование.",
+      "concept_ids": [
+        "go-stack-vs-heap",
+        "go-gc",
+        "cpython-gc",
+        "profiling",
+        "go-goroutine",
+        "go-scheduler-gmp"
+      ],
+      "practice_ids": [
+        "go-stack-vs-heap-pr-01",
+        "go-gc-pr-01",
+        "cpython-gc-pr-01",
+        "profiling-pr-01",
+        "go-goroutine-pr-01",
+        "go-scheduler-gmp-pr-01"
+      ],
+      "question_ids": [
+        "go-stack-vs-heap-q-07",
+        "go-gc-q-05",
+        "cpython-gc-q-05",
+        "profiling-q-04",
+        "go-goroutine-q-06",
+        "go-scheduler-gmp-q-07"
+      ]
+    }
+  ]
+}

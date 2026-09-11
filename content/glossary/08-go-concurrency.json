@@ -1,0 +1,164 @@
+{
+  "terms": [
+    {
+      "term": "concurrency",
+      "aliases": [
+        "конкурентность"
+      ],
+      "definition": "Организация программы из независимых задач, которые могут продвигаться одновременно: пока одна ждёт, продвигается другая. Возможна и на одном ядре.",
+      "concept_id": "concurrency-vs-parallelism"
+    },
+    {
+      "term": "parallelism",
+      "aliases": [
+        "параллелизм"
+      ],
+      "definition": "Фактическое выполнение нескольких задач в один и тот же момент на разных ядрах процессора.",
+      "concept_id": "concurrency-vs-parallelism"
+    },
+    {
+      "term": "race condition",
+      "aliases": [
+        "состояние гонки"
+      ],
+      "definition": "Ошибка, при которой результат зависит от случайного порядка выполнения конкурентных операций. Пример — `counter++` из нескольких goroutine без синхронизации.",
+      "concept_id": "race-condition"
+    },
+    {
+      "term": "data race",
+      "aliases": [
+        "гонка данных"
+      ],
+      "definition": "Одновременный доступ нескольких goroutine к одной памяти без синхронизации, когда хотя бы один доступ — запись.",
+      "concept_id": "race-condition"
+    },
+    {
+      "term": "race detector",
+      "aliases": [
+        "-race",
+        "детектор гонок"
+      ],
+      "definition": "Инструмент Go, который во время выполнения отслеживает обращения к памяти и сообщает о data race. Включается флагом: `go test -race ./...` или `go run -race .`.",
+      "concept_id": "race-condition"
+    },
+    {
+      "term": "context.Context",
+      "aliases": [],
+      "definition": "Объект, который передают по цепочке вызовов, чтобы распространять отмену и дедлайн. При отмене закрывается `ctx.Done()`, и все, кто его слушает, прекращают работу.",
+      "concept_id": "go-sync-primitives",
+      "scope": [
+        "Go"
+      ]
+    },
+    {
+      "term": "mutex",
+      "aliases": [
+        "мьютекс",
+        "sync.Mutex"
+      ],
+      "definition": "Замок, который пускает в защищённый участок кода только одну goroutine за раз; остальные ждут на `Lock()`, пока владелец не вызовет `Unlock()`.",
+      "concept_id": "go-mutex"
+    },
+    {
+      "term": "RWMutex",
+      "aliases": [
+        "sync.RWMutex"
+      ],
+      "definition": "Замок, который пускает одновременно многих читателей (`RLock`) или одного писателя (`Lock`).",
+      "concept_id": "go-sync-primitives"
+    },
+    {
+      "term": "критическая секция",
+      "aliases": [
+        "critical section"
+      ],
+      "definition": "Участок кода между `Lock()` и `Unlock()`, который в каждый момент выполняет только одна goroutine.",
+      "concept_id": "go-mutex"
+    },
+    {
+      "term": "atomic",
+      "aliases": [
+        "sync/atomic"
+      ],
+      "definition": "Неделимые операции над одним значением (`Add`, `Load`, `Store`, `CompareAndSwap`) без блокировок. Подходят для счётчиков и флагов, но не защищают связь между несколькими полями.",
+      "concept_id": "go-sync-primitives"
+    },
+    {
+      "term": "sync.Once",
+      "aliases": [],
+      "definition": "Примитив, который гарантирует, что функция в `once.Do(f)` выполнится ровно один раз, даже если её вызвали из многих goroutine одновременно.",
+      "concept_id": "go-sync-primitives"
+    },
+    {
+      "term": "WaitGroup",
+      "aliases": [
+        "sync.WaitGroup"
+      ],
+      "definition": "Счётчик незавершённых goroutine: `Add` перед запуском, `Done` в конце, `Wait` ждёт, пока счётчик не станет нулём. Данные не защищает.",
+      "concept_id": "go-sync-primitives"
+    },
+    {
+      "term": "channel",
+      "aliases": [
+        "chan"
+      ],
+      "definition": "Труба для передачи значений между goroutine: одна отправляет (`ch <- v`), другая получает (`<-ch`), и эти операции синхронизируют их.",
+      "concept_id": "go-channel"
+    },
+    {
+      "term": "unbuffered channel",
+      "aliases": [
+        "небуферизованный канал"
+      ],
+      "definition": "Канал без буфера (`make(chan T)`): отправитель ждёт, пока получатель заберёт значение, — goroutine встречаются.",
+      "concept_id": "go-channel"
+    },
+    {
+      "term": "buffered channel",
+      "aliases": [
+        "буферизованный канал"
+      ],
+      "definition": "Канал с очередью фиксированной ёмкости (`make(chan T, n)`): отправка блокируется, только когда буфер полон, получение — когда пуст.",
+      "concept_id": "go-channel"
+    },
+    {
+      "term": "оператор select",
+      "aliases": [],
+      "definition": "Конструкция Go, которая ждёт первую готовую из нескольких операций с каналами, например результат или `ctx.Done()`. С веткой `default` не блокируется.",
+      "concept_id": "go-channel"
+    },
+    {
+      "term": "deadlock",
+      "aliases": [
+        "взаимная блокировка"
+      ],
+      "definition": "Ситуация, когда goroutine не могут продолжить выполнение, потому что ждут ресурсы друг друга: G1 держит A и ждёт B, G2 держит B и ждёт A.",
+      "concept_id": "deadlock"
+    },
+    {
+      "term": "goroutine dump",
+      "aliases": [
+        "дамп goroutine"
+      ],
+      "definition": "Снимок стеков всех goroutine процесса: видно, кто что сейчас выполняет или чего ждёт. Снимается через `/debug/pprof/goroutine?debug=2` или сигналом SIGQUIT.",
+      "concept_id": "deadlock"
+    },
+    {
+      "term": "loop variable",
+      "aliases": [
+        "переменная цикла",
+        "итерационная переменная"
+      ],
+      "definition": "Переменная, объявленная в заголовке `for`. До Go 1.22 она была одна на весь цикл, с Go 1.22 (при `go 1.22`+ в go.mod) создаётся заново на каждой итерации.",
+      "concept_id": "go-loop-variable"
+    },
+    {
+      "term": "closure",
+      "aliases": [
+        "замыкание"
+      ],
+      "definition": "Функция, которая использует переменные из окружающего кода. Она захватывает саму переменную, а не копию её значения, и видит её текущее значение в момент вызова.",
+      "concept_id": "go-loop-variable"
+    }
+  ]
+}

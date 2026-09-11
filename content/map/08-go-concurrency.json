@@ -1,0 +1,90 @@
+{
+  "relations": [
+    {
+      "from": "go-mutex",
+      "to": "go-channel",
+      "type": "contrasts_with"
+    },
+    {
+      "from": "go-mutex",
+      "to": "race-condition",
+      "type": "solves"
+    },
+    {
+      "from": "go-sync-primitives",
+      "to": "race-condition",
+      "type": "solves"
+    },
+    {
+      "from": "go-mutex",
+      "to": "go-sync-primitives",
+      "type": "part_of"
+    },
+    {
+      "from": "go-channel",
+      "to": "go-sync-primitives",
+      "type": "part_of"
+    },
+    {
+      "from": "go-loop-variable",
+      "to": "race-condition",
+      "type": "causes"
+    },
+    {
+      "from": "deadlock",
+      "to": "go-mutex",
+      "type": "related"
+    },
+    {
+      "from": "deadlock",
+      "to": "go-channel",
+      "type": "related"
+    },
+    {
+      "from": "deadlock",
+      "to": "race-condition",
+      "type": "contrasts_with"
+    },
+    {
+      "from": "concurrency-vs-parallelism",
+      "to": "race-condition",
+      "type": "related"
+    },
+    {
+      "from": "deadlock",
+      "to": "profiling",
+      "type": "related"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-go-concurrency",
+      "title": "Go Concurrency",
+      "description": "Гонки, выбор примитива синхронизации, каналы, deadlock и захват переменной цикла: найти проблему по коду или симптому и исправить.",
+      "concept_ids": [
+        "concurrency-vs-parallelism",
+        "race-condition",
+        "go-sync-primitives",
+        "go-mutex",
+        "go-channel",
+        "deadlock",
+        "go-loop-variable"
+      ],
+      "practice_ids": [
+        "race-condition-pr-01",
+        "go-sync-primitives-pr-01",
+        "go-channel-pr-01",
+        "deadlock-pr-01",
+        "go-loop-variable-pr-01"
+      ],
+      "question_ids": [
+        "race-condition-q-04",
+        "go-mutex-q-02",
+        "go-channel-q-03",
+        "deadlock-q-05",
+        "go-loop-variable-q-04",
+        "go-loop-variable-q-06"
+      ]
+    }
+  ]
+}

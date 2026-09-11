@@ -1,0 +1,125 @@
+{
+  "terms": [
+    {
+      "term": "array",
+      "aliases": [],
+      "definition": "Последовательность фиксированной длины, элементы которой лежат подряд в памяти. Размер — часть типа (`[3]int`), при присваивании и передаче в функцию массив копируется целиком.",
+      "concept_id": "go-array"
+    },
+    {
+      "term": "value semantics",
+      "aliases": [
+        "семантика значения"
+      ],
+      "definition": "Значение копируется целиком при присваивании и передаче в функцию. У массива копируются все элементы, у slice — только дескриптор.",
+      "concept_id": "go-array"
+    },
+    {
+      "term": "slice",
+      "aliases": [
+        "срез"
+      ],
+      "definition": "Дескриптор участка массива: pointer, len и cap. Сами элементы лежат в backing array, slice описывает, какой кусок из него виден.",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "slice header",
+      "aliases": [
+        "slice descriptor",
+        "дескриптор slice",
+        "заголовок slice"
+      ],
+      "definition": "Само значение slice — три поля: pointer, len, cap (24 байта на 64-битной платформе). При присваивании и передаче в функцию копируется только оно, элементы остаются общими.",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "backing array",
+      "aliases": [
+        "базовый массив"
+      ],
+      "definition": "Массив, в котором реально лежат элементы slice. Несколько slice могут смотреть на один backing array и видеть изменения друг друга.",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "len",
+      "aliases": [
+        "length"
+      ],
+      "definition": "Длина slice: сколько элементов видно и доступно по индексу (`0 ≤ i < len`). Для канала — сколько элементов сейчас в буфере.",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "cap",
+      "aliases": [
+        "capacity"
+      ],
+      "definition": "Ёмкость slice: сколько места от начала участка до конца backing array. До этого размера slice растёт через append без реаллокации. Для канала — размер буфера.",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "nil slice",
+      "aliases": [],
+      "definition": "Slice без backing array: `var s []int`, len и cap равны 0. С ним работают len, range и append; от пустого `[]int{}` отличается сравнением с nil и в JSON (`null` против `[]`).",
+      "concept_id": "go-slice"
+    },
+    {
+      "term": "append",
+      "aliases": [],
+      "definition": "Встроенная функция: добавляет элементы в конец slice и возвращает новый slice. Результат нужно присвоить: `s = append(s, x)`.",
+      "concept_id": "go-slice-append"
+    },
+    {
+      "term": "реаллокация",
+      "aliases": [
+        "reallocation",
+        "реаллокации"
+      ],
+      "definition": "Выделение нового, большего backing array, когда append не хватает capacity. Данные копируются, результат смотрит на новый массив, старый остаётся прежним.",
+      "concept_id": "go-slice-append"
+    },
+    {
+      "term": "subslice",
+      "aliases": [
+        "reslicing"
+      ],
+      "definition": "Slice, полученный из другого выражением `s[low:high]`. Не копирует данные и смотрит в тот же backing array.",
+      "concept_id": "go-subslice"
+    },
+    {
+      "term": "full slice expression",
+      "aliases": [
+        "three-index slice"
+      ],
+      "definition": "Выражение `s[low:high:max]`, которое задаёт ещё и cap = max − low. При cap = len следующий append обязан скопировать данные в новый массив.",
+      "concept_id": "go-subslice"
+    },
+    {
+      "term": "memory retention",
+      "aliases": [
+        "удержание памяти"
+      ],
+      "definition": "Маленький объект держит в памяти большой: например, subslice на 10 байт не даёт GC освободить весь мегабайтный backing array.",
+      "concept_id": "go-subslice"
+    },
+    {
+      "term": "copy",
+      "aliases": [],
+      "definition": "Встроенная функция `copy(dst, src)`: копирует min(len(dst), len(src)) элементов и возвращает их число. Нужна, чтобы отвязать данные от чужого backing array.",
+      "concept_id": "go-subslice"
+    },
+    {
+      "term": "slices.Clone",
+      "aliases": [
+        "bytes.Clone"
+      ],
+      "definition": "Функции стандартной библиотеки, которые возвращают копию slice в новом backing array (`slices` — с Go 1.21, `bytes.Clone` — с Go 1.20).",
+      "concept_id": "go-subslice"
+    },
+    {
+      "term": "make",
+      "aliases": [],
+      "definition": "Встроенная функция: `make([]T, len, cap)` выделяет backing array на cap элементов и возвращает slice длины len над ним. Также создаёт map и channel.",
+      "concept_id": "go-slice"
+    }
+  ]
+}

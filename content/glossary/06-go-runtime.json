@@ -1,0 +1,208 @@
+{
+  "terms": [
+    {
+      "term": "stack",
+      "aliases": [
+        "стек вызовов",
+        "call stack"
+      ],
+      "definition": "Память для локальных данных вызова функции, устроенная как стопка: вызов кладёт свой stack frame сверху, return его снимает. Освобождается без участия GC.",
+      "concept_id": "go-stack-vs-heap",
+      "scope": [
+        "Go"
+      ]
+    },
+    {
+      "term": "heap",
+      "aliases": [],
+      "definition": "Память для объектов, которые могут пережить вызов функции или быть доступны из других частей программы. В Go её освобождает GC.",
+      "concept_id": "go-stack-vs-heap"
+    },
+    {
+      "term": "stack frame",
+      "aliases": [],
+      "definition": "Участок stack одного вызова функции: локальные переменные, аргументы, адрес возврата. Перестаёт использоваться при return.",
+      "concept_id": "go-stack-vs-heap"
+    },
+    {
+      "term": "escape analysis",
+      "aliases": [
+        "escape"
+      ],
+      "definition": "Анализ компилятора Go: может ли ссылка на значение пережить вызов или стать доступной извне. Если может — значение «убегает» в heap, если нет — остаётся на stack.",
+      "concept_id": "go-stack-vs-heap"
+    },
+    {
+      "term": "GC",
+      "aliases": [
+        "garbage collector",
+        "garbage collection",
+        "сборщик мусора",
+        "сборка мусора",
+        "tracing GC",
+        "tracing garbage collector"
+      ],
+      "definition": "Механизм runtime, который сам освобождает память ненужных объектов. В Go — конкурентный tracing GC: собирает всё, что недостижимо от корней.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "roots",
+      "aliases": [
+        "GC roots",
+        "корни",
+        "достижимость",
+        "reachability"
+      ],
+      "definition": "Места, откуда программа напрямую держит указатели: stacks goroutine, глобальные переменные, регистры. Объект жив (достижим), пока до него можно дойти по указателям от корней.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "mark and sweep",
+      "aliases": [
+        "mark-and-sweep"
+      ],
+      "definition": "Две фазы tracing GC: mark — пометить все объекты, достижимые от корней; sweep — вернуть аллокатору память непомеченных.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "write barrier",
+      "aliases": [],
+      "definition": "Небольшой дополнительный код, который во время фазы mark выполняется при записи указателя. Не даёт GC пропустить живой объект, пока приложение меняет ссылки.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "STW",
+      "aliases": [
+        "stop-the-world"
+      ],
+      "definition": "Момент, когда выполнение goroutine приложения приостанавливается для отдельных операций GC. В современном Go такие паузы короткие, а основная работа GC идёт параллельно с приложением.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "GOGC",
+      "aliases": [],
+      "definition": "Настройка частоты GC: следующий цикл начинается, когда heap вырос на GOGC процентов относительно живых данных после прошлого цикла. По умолчанию 100 — примерно до 2× live heap.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "GOMEMLIMIT",
+      "aliases": [],
+      "definition": "Мягкий лимит памяти для runtime Go (с Go 1.19): при приближении к нему GC запускается чаще. В контейнерах его ставят немного ниже лимита памяти.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "allocation rate",
+      "aliases": [
+        "темп аллокаций"
+      ],
+      "definition": "Сколько памяти программа выделяет в heap за секунду. Чем он выше, тем чаще циклы GC и тем больше CPU уходит на сборку.",
+      "concept_id": "go-gc"
+    },
+    {
+      "term": "reference counting",
+      "aliases": [
+        "reference count",
+        "refcount",
+        "подсчёт ссылок",
+        "счётчик ссылок"
+      ],
+      "definition": "Счётчик ссылок у каждого объекта: когда он становится 0, объект освобождается сразу. Основа управления памятью в CPython.",
+      "concept_id": "cpython-gc"
+    },
+    {
+      "term": "cyclic GC",
+      "aliases": [
+        "cyclic garbage collector",
+        "сборщик циклов"
+      ],
+      "definition": "Сборщик CPython, который находит группы объектов, ссылающихся только друг на друга. Нужен, потому что у таких объектов счётчик ссылок никогда не падает до нуля.",
+      "concept_id": "cpython-gc"
+    },
+    {
+      "term": "GIL",
+      "aliases": [
+        "Global Interpreter Lock"
+      ],
+      "definition": "Глобальная блокировка интерпретатора CPython: Python-код в один момент выполняет только один поток. Одна из причин её существования — защита счётчиков ссылок.",
+      "concept_id": "cpython-gc"
+    },
+    {
+      "term": "pprof",
+      "aliases": [],
+      "definition": "Встроенный профилировщик Go: CPU-, heap-, goroutine-, block- и mutex-профили. Снимается в тестах или с работающего сервиса через пакет `net/http/pprof`.",
+      "concept_id": "profiling"
+    },
+    {
+      "term": "flame graph",
+      "aliases": [],
+      "definition": "Визуализация профиля: ширина полосы — доля времени в функции, по вертикали — цепочка вызовов. Сразу видно, какие функции самые тяжёлые.",
+      "concept_id": "profiling"
+    },
+    {
+      "term": "goroutine",
+      "aliases": [
+        "goroutines",
+        "горутина"
+      ],
+      "definition": "Лёгкая единица конкурентного выполнения, которой управляет runtime Go, а не ОС. Стартует с маленького растущего stack и выполняется на OS thread.",
+      "concept_id": "go-goroutine"
+    },
+    {
+      "term": "OS thread",
+      "aliases": [
+        "OS threads",
+        "поток ОС",
+        "потоки ОС"
+      ],
+      "definition": "Поток операционной системы: им управляет ядро, стек у него фиксированного размера, создание и переключение дороже, чем у goroutine. В модели G/M/P это M.",
+      "concept_id": "go-goroutine"
+    },
+    {
+      "term": "goroutine leak",
+      "aliases": [
+        "утечка goroutine",
+        "утечки goroutine",
+        "утечку goroutine"
+      ],
+      "definition": "Goroutine, заблокированная навсегда — например, ждёт channel, в который никто не отправит. GC её не соберёт, поэтому растут число goroutine и память.",
+      "concept_id": "go-goroutine"
+    },
+    {
+      "term": "G/M/P",
+      "aliases": [
+        "GMP"
+      ],
+      "definition": "Модель планировщика Go: G — goroutine, M — OS thread, P — processor, ресурс runtime, необходимый M для выполнения Go-кода. G выполняется на M, M получает работу через P.",
+      "concept_id": "go-scheduler-gmp"
+    },
+    {
+      "term": "run queue",
+      "aliases": [
+        "local run queue",
+        "global run queue"
+      ],
+      "definition": "Очередь goroutine, готовых к выполнению. У каждого P своя local run queue, плюс есть общая global run queue.",
+      "concept_id": "go-scheduler-gmp"
+    },
+    {
+      "term": "work stealing",
+      "aliases": [],
+      "definition": "Если у P кончилась работа, его поток забирает половину очереди у другого P. Так ядра не простаивают без центрального диспетчера.",
+      "concept_id": "go-scheduler-gmp"
+    },
+    {
+      "term": "GOMAXPROCS",
+      "aliases": [],
+      "definition": "Число P — сколько потоков одновременно выполняют Go-код. По умолчанию равно числу доступных CPU.",
+      "concept_id": "go-scheduler-gmp"
+    },
+    {
+      "term": "preemption",
+      "aliases": [
+        "вытеснение"
+      ],
+      "definition": "Принудительное снятие долго работающей goroutine с потока, чтобы дать выполниться другим. С Go 1.14 вытеснение асинхронное — через сигналы.",
+      "concept_id": "go-scheduler-gmp"
+    }
+  ]
+}

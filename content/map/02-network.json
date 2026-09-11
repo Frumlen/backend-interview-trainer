@@ -1,0 +1,77 @@
+{
+  "relations": [
+    {
+      "from": "tcp",
+      "to": "udp",
+      "type": "contrasts_with"
+    },
+    {
+      "from": "http-methods",
+      "to": "http",
+      "type": "part_of"
+    },
+    {
+      "from": "http-status-codes",
+      "to": "http",
+      "type": "part_of"
+    },
+    {
+      "from": "http-methods",
+      "to": "http-status-codes",
+      "type": "related"
+    },
+    {
+      "from": "http2",
+      "to": "http",
+      "type": "extends"
+    },
+    {
+      "from": "http3-quic",
+      "to": "http2",
+      "type": "extends"
+    },
+    {
+      "from": "http3-quic",
+      "to": "udp",
+      "type": "related"
+    },
+    {
+      "from": "http3-quic",
+      "to": "tcp",
+      "type": "contrasts_with"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-http-transport",
+      "title": "HTTP и транспорт",
+      "description": "От выбора транспорта (TCP/UDP) до семантики HTTP и выбора версии протокола: соединения, методы и коды, multiplexing, HTTP/3.",
+      "concept_ids": [
+        "tcp",
+        "udp",
+        "http",
+        "http-methods",
+        "http-status-codes",
+        "http2",
+        "http3-quic"
+      ],
+      "practice_ids": [
+        "tcp-pr-01",
+        "udp-pr-01",
+        "http-pr-01",
+        "http-methods-pr-01",
+        "http2-pr-01",
+        "http3-quic-pr-01"
+      ],
+      "question_ids": [
+        "tcp-q-03",
+        "udp-q-04",
+        "http-q-06",
+        "http-status-codes-q-04",
+        "http2-q-06",
+        "http3-quic-q-02",
+        "http-methods-q-04"
+      ]
+    }
+  ]
+}

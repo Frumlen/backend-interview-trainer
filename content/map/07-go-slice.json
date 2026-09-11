@@ -1,0 +1,68 @@
+{
+  "relations": [
+    {
+      "from": "go-array",
+      "to": "go-slice",
+      "type": "contrasts_with"
+    },
+    {
+      "from": "go-slice-append",
+      "to": "go-subslice",
+      "type": "causes"
+    },
+    {
+      "from": "go-subslice",
+      "to": "go-gc",
+      "type": "related"
+    },
+    {
+      "from": "go-subslice",
+      "to": "profiling",
+      "type": "related"
+    },
+    {
+      "from": "go-slice-append",
+      "to": "race-condition",
+      "type": "related"
+    },
+    {
+      "from": "go-slice-in-function",
+      "to": "go-slice-append",
+      "type": "related"
+    },
+    {
+      "from": "go-slice",
+      "to": "go-stack-vs-heap",
+      "type": "related"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-go-slice",
+      "title": "Go Memory: slice",
+      "description": "Array → slice → append → subslice → передача в функцию: предсказание вывода, поиск aliasing-багов и удержания памяти.",
+      "concept_ids": [
+        "go-array",
+        "go-slice",
+        "go-slice-append",
+        "go-subslice",
+        "go-slice-in-function"
+      ],
+      "practice_ids": [
+        "go-array-pr-01",
+        "go-slice-pr-01",
+        "go-slice-append-pr-01",
+        "go-subslice-pr-01",
+        "go-slice-in-function-pr-01"
+      ],
+      "question_ids": [
+        "go-slice-q-05",
+        "go-slice-append-q-07",
+        "go-subslice-q-02",
+        "go-subslice-q-04",
+        "go-slice-in-function-q-04",
+        "go-slice-in-function-q-06"
+      ]
+    }
+  ]
+}

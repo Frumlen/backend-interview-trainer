@@ -1,0 +1,542 @@
+{
+  "id": "go-mutex",
+  "title": "Mutex",
+  "domain": "Go / Конкурентность",
+  "level": "L3",
+  "tags": [
+    "go",
+    "concurrency",
+    "sync",
+    "mutex"
+  ],
+  "prerequisites": [
+    "race-condition"
+  ],
+  "summary": "Mutex используют для защиты общего состояния: в критической секции в каждый момент находится только одна goroutine. Это не «хуже channel» и не «лучше channel» — это другой инструмент. Channel — для передачи данных и координации между goroutine.",
+  "mental_model": {
+    "type": "sequence",
+    "description": "Mutex — замок на критическую секцию: одна goroutine внутри, остальные ждут у входа.",
+    "elements": [
+      "G1",
+      "mutex",
+      "G2"
+    ],
+    "relations": [
+      "G1 -> mutex: Lock() — захватила",
+      "G2 -> mutex: Lock() — ждёт",
+      "G1 -> mutex: Unlock()",
+      "mutex -> G2: захват получен"
+    ],
+    "table": {
+      "columns": [
+        "Критерий",
+        "Mutex",
+        "Channel"
+      ],
+      "rows": [
+        [
+          "Задача",
+          "защита общего состояния",
+          "передача данных / координация"
+        ],
+        [
+          "Владение данными",
+          "данные разделяются, доступ по очереди",
+          "данные передаются от goroutine к goroutine"
+        ],
+        [
+          "Типичный пример",
+          "кэш, счётчики, несколько полей",
+          "pipeline, worker pool, сигнал done"
+        ],
+        [
+          "Типичная ошибка",
+          "забытый Unlock, I/O под lock",
+          "deadlock, close дважды, утечка goroutine"
+        ]
+      ]
+    }
+  },
+  "problem": {
+    "question": "Несколько goroutine читают и изменяют один map-кэш. Как не получить data race и не нарушить инварианты?",
+    "context": "Состояние по природе общее: его нельзя «передать» одной goroutine без перестройки архитектуры.",
+    "why_it_matters": "Без взаимного исключения — потерянные обновления, `fatal error: concurrent map writes` и нарушенные инварианты."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Lock",
+        "description": "`mu.Lock()` захватывает mutex. Если он занят, goroutine блокируется до освобождения."
+      },
+      {
+        "order": 2,
+        "title": "Критическая секция",
+        "description": "Код между Lock и Unlock выполняет одна goroutine за раз, поэтому инварианты над общими данными сохраняются."
+      },
+      {
+        "order": 3,
+        "title": "Unlock и happens-before",
+        "description": "`Unlock()` освобождает mutex. Все записи, сделанные до Unlock, гарантированно видны goroutine, которая захватит mutex следующей."
+      },
+      {
+        "order": 4,
+        "title": "Режимы sync.Mutex",
+        "description": "Обычно ожидающие goroutine конкурируют за lock (normal mode). Если goroutine ждёт дольше ~1 мс, mutex переходит в starvation mode и отдаёт lock в порядке очереди, чтобы избежать голодания."
+      }
+    ],
+    "key_objects": [
+      "sync.Mutex",
+      "критическая секция",
+      "sync.RWMutex",
+      "defer mu.Unlock()"
+    ],
+    "important_distinctions": [
+      "Mutex — защита общего состояния, channel — передача данных или координация.",
+      "Не надо говорить «Channels лучше mutex» — это разные инструменты.",
+      "sync.Mutex не реентерабельный: повторный Lock в той же goroutine — deadlock.",
+      "Mutex не привязан к goroutine: Unlock может вызвать другая goroutine (но так делать не стоит)."
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "type Cache struct {\n    mu   sync.Mutex\n    data map[string]string\n}\n\nfunc (c *Cache) Set(k, v string) {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    c.data[k] = v\n}\n\nfunc (c *Cache) Get(k string) (string, bool) {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    v, ok := c.data[k]\n    return v, ok\n}",
+    "explanation": "Состояние (map) общее, поэтому все доступы, и чтение, и запись, идут под одним mutex. Pointer receiver обязателен: mutex нельзя копировать.",
+    "expected_result": null
+  },
+  "details": [
+    {
+      "title": "Мьютекс vs канал — разные инструменты",
+      "description": "Хороший ответ: «Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine». Фраза «channels лучше mutex» — красный флаг.",
+      "importance": "critical"
+    },
+    {
+      "title": "Чтение тоже под lock",
+      "description": "Если есть хотя бы один писатель, читатели тоже должны брать lock (или RLock). Иначе это data race.",
+      "importance": "critical"
+    },
+    {
+      "title": "defer mu.Unlock()",
+      "description": "Гарантирует Unlock на всех путях, включая early return и panic. Цена defer в современных Go пренебрежимо мала.",
+      "importance": "important"
+    },
+    {
+      "title": "Не держать lock во время I/O",
+      "description": "Сетевые вызовы под mutex сериализуют все ожидающие goroutine и раздувают latency.",
+      "importance": "important"
+    },
+    {
+      "title": "Нельзя копировать",
+      "description": "Структуры с mutex передают по указателю, методы делают с pointer receiver; `go vet` ловит копирование.",
+      "importance": "important"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "В критической секции одного mutex в каждый момент не более одной goroutine.",
+      "why": "Это определение взаимного исключения."
+    },
+    {
+      "statement": "Все доступы к защищаемым данным идут под одним и тем же mutex.",
+      "why": "Если хотя бы один доступ идёт мимо lock, защита не работает."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "go-mutex-fm-forgot-unlock",
+      "title": "Забытый Unlock на одном из путей",
+      "cause": "Early return или panic между Lock и Unlock без defer.",
+      "symptom": "Все последующие вызовы зависают, растёт число goroutine.",
+      "mechanism": "Mutex остаётся захваченным навсегда, и каждый следующий Lock блокируется.",
+      "fix": "`defer mu.Unlock()` сразу после Lock.",
+      "prevention": "Идиома Lock+defer Unlock, короткие критические секции."
+    },
+    {
+      "id": "go-mutex-fm-reentrant",
+      "title": "Повторный Lock в той же goroutine",
+      "cause": "Метод под lock вызывает другой метод, который тоже берёт тот же mutex.",
+      "symptom": "Goroutine навсегда зависает на втором Lock.",
+      "mechanism": "sync.Mutex не реентерабельный: goroutine ждёт сама себя.",
+      "fix": "Разделить на публичные методы (берут lock) и внутренние `xxxLocked` (предполагают, что lock уже взят).",
+      "prevention": null
+    },
+    {
+      "id": "go-mutex-fm-contention",
+      "title": "Contention на горячем mutex",
+      "cause": "Один глобальный mutex на всё состояние при высокой нагрузке или долгие секции.",
+      "symptom": "CPU не загружен, latency растёт, в pprof mutex/block профиле — ожидание на Lock.",
+      "mechanism": "Goroutine простаивают в очереди на один lock, пропускная способность ограничена последовательной секцией.",
+      "fix": "Сократить секцию, шардировать состояние (N mutex по хешу ключа), RWMutex для read-heavy, atomic для простых значений.",
+      "prevention": "Профилировать `runtime.SetMutexProfileFraction` + pprof."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Простая модель для защиты общего состояния.",
+      "Защищает инварианты из нескольких полей, чего не умеет atomic.",
+      "Дешевле channel на операцию."
+    ],
+    "costs": [
+      "Contention при высокой конкуренции.",
+      "Нужно дисциплинированно брать lock на всех доступах."
+    ],
+    "risks": [
+      "Deadlock (порядок захвата, реентерабельность), забытый Unlock."
+    ],
+    "when_tradeoff_matters": "Когда выбираешь между mutex и channel или когда mutex становится узким местом под нагрузкой."
+  },
+  "usage": {
+    "use_when": [
+      "Нужно защитить общее состояние (кэш, map, несколько связанных полей)."
+    ],
+    "avoid_when": [
+      "Нужно передать данные или организовать координацию между goroutine — там channel.",
+      "Одиночный счётчик или флаг — хватит atomic."
+    ],
+    "signals": [
+      "Несколько goroutine читают и пишут одну структуру данных.",
+      "Есть инвариант, связывающий несколько полей."
+    ],
+    "production_considerations": [
+      "Держать критические секции короткими, без I/O.",
+      "Смотреть pprof mutex/block профили при росте latency."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "go-channel",
+      "dimension": "Основная задача",
+      "difference": "Mutex — защита общего состояния; channel — передача данных и координация между goroutine.",
+      "why_it_matters": "Критерий выбора: данные разделяются (mutex) или передаются (channel)?"
+    },
+    {
+      "concept_id": "go-sync-primitives",
+      "dimension": "Альтернативы внутри sync",
+      "difference": "RWMutex — много читателей / один писатель; atomic — одиночное значение без блокировок.",
+      "why_it_matters": "Для read-heavy или простого счётчика обычный Mutex может быть не лучшим выбором."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "go-mutex-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Для чего нужен mutex?",
+      "context": null,
+      "expected_answer": "Для защиты общего состояния: mutex гарантирует, что критическую секцию в каждый момент выполняет только одна goroutine, поэтому доступ к общим данным не превращается в data race.",
+      "key_points": [
+        "защита общего состояния",
+        "одна goroutine в критической секции",
+        "предотвращает data race"
+      ],
+      "common_mistakes": [
+        "Говорить, что mutex «передаёт данные»."
+      ],
+      "hints": [],
+      "follow_up": "Когда вместо mutex возьмёшь channel?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ]
+    },
+    {
+      "id": "go-mutex-q-02",
+      "type": "decision",
+      "level": "L3",
+      "question": "Когда используете mutex, а когда channel?",
+      "context": null,
+      "expected_answer": "Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine. Это разные инструменты; говорить «channels лучше mutex» неверно. Критерий: данные разделяются несколькими goroutine (mutex) или передаются от одной к другой (channel).",
+      "key_points": [
+        "mutex — защита общего состояния",
+        "channel — передача данных / координация",
+        "не «channels лучше mutex»",
+        "критерий: разделение vs передача"
+      ],
+      "common_mistakes": [
+        "«Channels лучше mutex, это Go-way».",
+        "Строить map-кэш на отдельной goroutine с каналами без необходимости."
+      ],
+      "hints": [
+        "Данные разделяются или передаются?"
+      ],
+      "follow_up": "Приведи пример, где channel был бы ошибкой.",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "decision"
+      ]
+    },
+    {
+      "id": "go-mutex-q-03",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что произойдёт при вызове `c.Incr()`?",
+      "context": null,
+      "code": "type Counter struct {\n    mu sync.Mutex\n    n  int\n}\n\nfunc (c *Counter) Value() int {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    return c.n\n}\n\nfunc (c *Counter) Incr() {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    if c.Value() < 100 {\n        c.n++\n    }\n}",
+      "code_language": "go",
+      "expected_answer": "Goroutine зависнет навсегда. `Incr` держит mutex и вызывает `Value`, который пытается снова взять тот же mutex. sync.Mutex не реентерабельный, поэтому goroutine ждёт сама себя. Если это единственная работающая goroutine, runtime завершит программу с `fatal error: all goroutines are asleep - deadlock!`, иначе будет тихое зависание. Исправление: внутри `Incr` читать `c.n` напрямую или сделать внутренний `valueLocked()`.",
+      "key_points": [
+        "повторный Lock в той же goroutine",
+        "sync.Mutex не реентерабельный",
+        "зависание / fatal error",
+        "внутренние методы без lock"
+      ],
+      "common_mistakes": [
+        "Считать, что Go-mutex реентерабельный, как в Java (synchronized)."
+      ],
+      "hints": [
+        "Сколько раз берётся один и тот же lock?"
+      ],
+      "follow_up": "Почему в Go намеренно нет реентерабельного mutex?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "predict",
+        "code"
+      ]
+    },
+    {
+      "id": "go-mutex-q-04",
+      "type": "debug",
+      "level": "L4",
+      "question": "После релиза p99 latency выросла в 10 раз, CPU почти не загружен. Что наиболее вероятно происходит и как это найти?",
+      "context": null,
+      "code": "func (s *Service) GetUser(ctx context.Context, id string) (User, error) {\n    s.mu.Lock()\n    defer s.mu.Unlock()\n    if u, ok := s.cache[id]; ok {\n        return u, nil\n    }\n    u, err := s.db.LoadUser(ctx, id) // ~50 мс\n    if err != nil {\n        return User{}, err\n    }\n    s.cache[id] = u\n    return u, nil\n}",
+      "code_language": "go",
+      "expected_answer": "Запрос в БД выполняется под общим mutex, поэтому все GetUser сериализуются: пока один ждёт БД 50 мс, остальные стоят в очереди на Lock. CPU простаивает — goroutine заблокированы. Найти: pprof block/mutex профиль или goroutine dump (много goroutine в `sync.(*Mutex).Lock`). Исправление: под lock только чтение и запись map, загрузка вне lock; дубли загрузок — через singleflight.",
+      "key_points": [
+        "I/O под mutex",
+        "сериализация запросов",
+        "CPU низкий — goroutine ждут lock",
+        "pprof mutex/block, goroutine dump",
+        "вынести I/O из критической секции"
+      ],
+      "common_mistakes": [
+        "Искать проблему в БД, не посмотрев на contention."
+      ],
+      "hints": [
+        "Сколько длится критическая секция?"
+      ],
+      "follow_up": "Как избежать двойной загрузки одного id после выноса I/O из-под lock?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "debug",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "go-mutex-q-05",
+      "type": "multiple_choice",
+      "level": "L2",
+      "question": "Какое утверждение о mutex и channel верно?",
+      "context": null,
+      "expected_answer": "Mutex — защита общего состояния, channel — передача данных и координация; выбор зависит от задачи.",
+      "key_points": [
+        "разные инструменты",
+        "выбор по задаче"
+      ],
+      "common_mistakes": [
+        "«Channels лучше mutex»."
+      ],
+      "hints": [],
+      "follow_up": null,
+      "priority": "secondary",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Channel — идиоматичная замена mutex, поэтому mutex в Go стоит использовать только в legacy-коде.",
+          "correct": false,
+          "explanation": "Это миф. Mutex — нормальный инструмент для защиты состояния, и стандартная библиотека активно его использует."
+        },
+        {
+          "id": "b",
+          "text": "Mutex защищает общее состояние, channel передаёт данные и координирует goroutine; выбор зависит от задачи.",
+          "correct": true,
+          "explanation": "Это стандартная формулировка: разные инструменты для разных задач."
+        },
+        {
+          "id": "c",
+          "text": "Mutex нужен только для map, для остальных типов достаточно channel с буфером 1.",
+          "correct": false,
+          "explanation": "Mutex защищает любые общие данные. Буферизованный канал ёмкости 1 можно использовать как lock, но это не делает его универсальной заменой."
+        },
+        {
+          "id": "d",
+          "text": "Channel всегда быстрее mutex, потому что не использует блокировок.",
+          "correct": false,
+          "explanation": "Канал внутри тоже использует блокировку и обычно дороже mutex на операцию."
+        }
+      ]
+    },
+    {
+      "id": "go-mutex-q-06",
+      "type": "decision",
+      "level": "L6",
+      "question": "Глобальный mutex на in-memory хранилище сессий стал узким местом (сотни тысяч операций в секунду, 90% — чтения). Какие варианты рассмотришь и чем за них заплатишь?",
+      "context": null,
+      "expected_answer": "(1) RWMutex — читатели не блокируют друг друга; цена — накладные расходы на учёт читателей, писатели всё равно блокируют всех. (2) Шардирование: N map, у каждой свой mutex, шард по хешу ключа; contention падает примерно в N раз, цена — операции над несколькими ключами усложняются. (3) Copy-on-write снапшот через atomic.Pointer — если записи редкие; цена — копирование на запись. (4) sync.Map — оптимизирован для кейсов «ключ пишется один раз, читается много» или непересекающихся наборов ключей у goroutine. Решение подтверждать бенчмарком и mutex-профилем.",
+      "key_points": [
+        "RWMutex для read-heavy",
+        "шардирование lock'ов",
+        "copy-on-write + atomic",
+        "sync.Map для специфичных паттернов",
+        "подтверждать профилем"
+      ],
+      "common_mistakes": [
+        "Сразу переписывать на каналы.",
+        "Выбирать без измерений."
+      ],
+      "hints": [],
+      "follow_up": "Как измеришь, что contention действительно уменьшился?",
+      "priority": "secondary",
+      "difficulty": 5,
+      "tags": [
+        "expert",
+        "decision"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "go-mutex-we-01",
+      "title": "Вынос I/O из критической секции",
+      "problem": "GetUser держит общий mutex на время запроса в БД, и latency растёт под нагрузкой.",
+      "context": null,
+      "solution": {
+        "steps": [
+          "Bug: критическая секция включает сетевой вызов длительностью ~50 мс.",
+          "Minimal fix: под lock только проверка кэша и запись результата, загрузка — вне lock.",
+          "Побочный эффект: два запроса одного id могут загрузить его дважды. Если это важно — `singleflight`.",
+          "Проверка: pprof mutex-профиль до и после, p99 latency."
+        ],
+        "code": "func (s *Service) GetUser(ctx context.Context, id string) (User, error) {\n    s.mu.Lock()\n    u, ok := s.cache[id]\n    s.mu.Unlock()\n    if ok {\n        return u, nil\n    }\n    u, err := s.db.LoadUser(ctx, id) // вне lock\n    if err != nil {\n        return User{}, err\n    }\n    s.mu.Lock()\n    s.cache[id] = u\n    s.mu.Unlock()\n    return u, nil\n}"
+      },
+      "why_it_works": "Критическая секция сокращается до операций над памятью (наносекунды), goroutine больше не ждут чужой I/O.",
+      "alternatives": [
+        "singleflight для дедупликации загрузок.",
+        "Шардированный кэш при высокой конкуренции."
+      ],
+      "tradeoffs": [
+        "Возможна двойная загрузка одного ключа — плата за отсутствие блокировки на время I/O."
+      ],
+      "common_mistakes": [
+        "Вызвать LoadUser без повторной проверки и перезаписать более свежее значение (зависит от семантики кэша)."
+      ]
+    }
+  ],
+  "practice": [],
+  "related_concepts": [
+    {
+      "concept_id": "race-condition",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "alternative"
+    },
+    {
+      "concept_id": "deadlock",
+      "relation": "next"
+    },
+    {
+      "concept_id": "go-sync-primitives",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Сервис держит в памяти кэш профилей — обычный `map`. Его читают и пишут обработчики запросов, каждый в своей goroutine.\n\nРазберёмся, как не дать им испортить общие данные, какие ловушки есть у замка и где проходит граница между mutex и channel.",
+    "beats": [
+      {
+        "problem": "Две goroutine одновременно пишут в один map. Процесс то падает с `fatal error: concurrent map writes`, то молча теряет записи. **Как сделать, чтобы с map в каждый момент работала только одна goroutine?**",
+        "solution": "Поставить на этот участок кода замок. Перед работой с map goroutine берёт замок, после — отдаёт. Если замок занят, goroutine ждёт у входа.\n```go\nc.mu.Lock()\nc.data[k] = v\nc.mu.Unlock()\n```\nКод между Lock и Unlock в каждый момент выполняет только одна goroutine.",
+        "term": "mutex (mutual exclusion — взаимное исключение); критическая секция",
+        "analogy": "Ключ от переговорки: ключ один, и пока он у тебя, никто другой не войдёт. Остальные ждут у двери."
+      },
+      {
+        "problem": "Запись под замком, а чтение `c.data[k]` оставили без него — «читать же безопасно». **Безопасно?**",
+        "solution": "Нет. Если хотя бы одна goroutine пишет, читатели тоже должны брать замок. Иначе чтение попадёт на середину записи — это та же гонка.\n\nПравило: все доступы к защищаемым данным — только под одним и тем же mutex. Один доступ мимо замка ломает всю защиту.",
+        "term": null
+      },
+      {
+        "problem": "Внутри критической секции случился ранний `return` по ошибке, и до `Unlock` дело не дошло. **Что будет со следующими запросами?**",
+        "solution": "Они встанут навсегда: замок остался закрытым, и каждый следующий `Lock` ждёт вечно. Поэтому Unlock ставят через defer сразу после Lock — он выполнится на любом пути, даже при panic.\n```go\nc.mu.Lock()\ndefer c.mu.Unlock()\n```",
+        "term": "defer mu.Unlock()",
+        "analogy": "Уходя из переговорки, ключ возвращают всегда — даже если выбежали посреди встречи."
+      },
+      {
+        "problem": "Метод `Incr` взял замок и внутри вызвал `Value`, который берёт этот же замок. **Что будет?**",
+        "solution": "Goroutine зависнет, ожидая сама себя. `sync.Mutex` не помнит, кто его взял, поэтому второй `Lock` из той же goroutine ждёт так же, как чужой.\n\nЛечится разделением: публичные методы берут замок, а внутренние (`valueLocked`) рассчитывают, что он уже взят.",
+        "term": "реентерабельность — у sync.Mutex её нет"
+      },
+      {
+        "problem": "Внутри критической секции сделали запрос в БД на 50 мс. **Почему p99 latency выросла в 10 раз, а CPU почти не загружен?**",
+        "solution": "Пока одна goroutine ждёт БД, все остальные стоят у замка — запросы выполняются строго по одному. CPU простаивает, потому что goroutine не работают, а ждут.\n\nПод замком держат только быструю работу с памятью, I/O выносят наружу.",
+        "term": "contention (конкуренция за lock)",
+        "analogy": "Один человек занял переговорку на час ради пятиминутного звонка — и в коридоре очередь."
+      },
+      {
+        "problem": "У структуры с mutex метод с value receiver: `func (s Stats) Inc()`. Внутри Lock/Unlock, а `-race` всё равно показывает гонку. **Почему замок не работает?**",
+        "solution": "Копия структуры — это и копия mutex. Каждый вызов блокирует собственный замок, которого больше никто не видит, и меняет собственную копию данных.\n\nСтруктуры с mutex передают по указателю, методы делают с pointer receiver. `go vet` предупреждает о копировании lock.",
+        "term": "copylocks (go vet)"
+      },
+      {
+        "problem": "Коллега говорит: «В Go принято использовать каналы, mutex — не Go-way». **Когда всё-таки mutex, а когда channel?**",
+        "solution": "Это разные инструменты. Mutex — когда данные общие и живут на месте: кэш, счётчики, несколько связанных полей. Goroutine приходят к ним по очереди. Channel — когда данные нужно передать от одной goroutine к другой или скоординировать их работу: pipeline, worker pool, сигнал завершения.\n\nВопрос-критерий: данные разделяются или передаются?",
+        "term": "mutex vs channel"
+      },
+      {
+        "problem": "**Чем заплатили за простоту mutex?**",
+        "solution": "Очередью. Все, кому нужен замок, проходят по одному, и под высокой нагрузкой горячий mutex становится узким местом. Лечат короткими секциями, шардированием (N map со своими mutex), RWMutex для данных, которые в основном читают, или atomic для одиночных значений.\n\nПлюс дисциплина: забытый Unlock, повторный Lock или разный порядок захвата двух mutex дают зависание.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine.\n\nЭто разные инструменты, а не «channels лучше mutex». Критерий выбора: данные разделяются между goroutine — mutex, передаются от одной к другой — channel."
+  },
+  "short_answer": {
+    "junior": "Mutex — замок для общих данных: в каждый момент с ними работает только одна goroutine, остальные ждут. Так несколько goroutine не портят, например, общий map. Если данные нужно не защитить, а передать другой goroutine, используют channel.",
+    "middle": "Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine. Это разные инструменты: говорить «channels лучше mutex» неверно.\n\nКак работает: `Lock()` захватывает mutex, а если он занят — goroutine ждёт. Код между Lock и Unlock (критическая секция) в каждый момент выполняет одна goroutine. Всё, что записано до `Unlock()`, увидит goroutine, которая захватит mutex следующей. Идиома — `defer mu.Unlock()` сразу после Lock.\n\nКогда применять: общее состояние — кэш, map, несколько связанных полей. Для передачи данных и координации — channel.\n\nДля одиночного счётчика или флага хватит atomic, для данных, которые в основном читают, — RWMutex.",
+    "senior": "Всё из middle, плюс:\n- Все доступы к данным, включая чтения, — под одним mutex; один доступ мимо lock ломает защиту.\n- `sync.Mutex` не реентерабельный: повторный Lock в той же goroutine — зависание. Паттерн: публичные методы берут lock, внутренние `xxxLocked` — нет.\n- Mutex нельзя копировать: pointer receiver, передача `*T`, проверка `go vet` (copylocks).\n- Под lock — только работа с памятью. I/O в критической секции сериализует запросы: p99 растёт, CPU простаивает. Диагностика — pprof mutex/block профили и goroutine dump, где много goroutine стоит в `sync.(*Mutex).Lock`.\n- Горячий mutex разгружают: короткие секции, шардирование по хешу ключа, RWMutex для read-heavy данных, `atomic.Pointer` на неизменяемый снапшот для редко меняющихся данных. Решение подтверждают бенчмарком и профилем.\n- Если goroutine ждёт lock дольше ~1 мс, sync.Mutex переходит в starvation mode и отдаёт lock строго по очереди, чтобы ожидающие не голодали.\n- Несколько mutex одновременно — риск deadlock, нужен единый порядок захвата.",
+    "visuals": {
+      "middle": [
+        {
+          "title": "Lock и Unlock двух goroutine",
+          "mermaid": "sequenceDiagram\n  participant G1 as Goroutine 1\n  participant M as mu\n  participant D as map cache\n  participant G2 as Goroutine 2\n  G1->>M: Lock — свободен, захватила\n  G2->>M: Lock — занят, ждёт\n  G1->>D: cache[k] = v\n  G1->>M: Unlock\n  M-->>G2: теперь mutex у Goroutine 2\n  G2->>D: читает cache[k] и видит v\n  G2->>M: Unlock",
+          "steps": [
+            "Goroutine 1 вызывает `mu.Lock()`: mutex свободен — захватила.",
+            "Goroutine 2 тоже хочет в map и вызывает `Lock()`, но mutex занят — она **блокируется**.",
+            "Goroutine 1 спокойно пишет в map: никто другой сейчас с ним не работает.",
+            "Goroutine 1 вызывает `Unlock()` — обычно через `defer mu.Unlock()` сразу после Lock.",
+            "Mutex достаётся ждущей Goroutine 2.",
+            "Goroutine 2 читает map и гарантированно видит запись первой: Unlock happens-before следующего Lock.",
+            "Goroutine 2 отпускает mutex. Чтение тоже шло под lock — иначе защиты нет."
+          ],
+          "caption": "Критическую секцию в каждый момент выполняет одна goroutine, а всё записанное до `Unlock` видит следующая, кто захватит mutex."
+        }
+      ],
+      "senior": [
+        {
+          "title": "I/O под lock сериализует запросы",
+          "mermaid": "sequenceDiagram\n  participant G1 as Запрос 1\n  participant G2 as Запрос 2\n  participant G3 as Запрос 3\n  participant M as mu\n  participant DB as БД\n  G1->>M: Lock\n  G1->>DB: запрос в БД прямо под lock\n  G2->>M: Lock — ждёт\n  G3->>M: Lock — ждёт\n  DB-->>G1: ответ\n  G1->>M: Unlock\n  M-->>G2: захватила и тоже идёт в БД под lock\n  Note over G3: ждёт два чужих обращения к БД, CPU простаивает",
+          "steps": [
+            "Первый запрос захватывает mutex.",
+            "И прямо под lock ходит в БД — это долгий сетевой вызов.",
+            "Второй запрос хочет тот же mutex и встаёт в ожидание.",
+            "Третий — тоже. В goroutine dump такие стоят в `sync.(*Mutex).Lock`.",
+            "БД наконец отвечает первому.",
+            "Первый отпускает mutex.",
+            "Второй захватывает его и тоже идёт в БД под lock — запросы выполняются строго по одному.",
+            "Третий ждёт уже два чужих I/O: p99 растёт, а CPU простаивает. Лечение — сходить в БД до Lock, под lock только обновить память."
+          ],
+          "caption": "Под lock — только работа с памятью: сетевой вызов в критической секции выстраивает все запросы в очередь."
+        }
+      ]
+    }
+  }
+}

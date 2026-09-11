@@ -1,0 +1,561 @@
+{
+  "id": "go-sync-primitives",
+  "title": "Примитивы синхронизации",
+  "domain": "Go / Конкурентность",
+  "level": "L3",
+  "tags": [
+    "go",
+    "concurrency",
+    "sync"
+  ],
+  "prerequisites": [
+    "race-condition"
+  ],
+  "summary": "В Go синхронизация строится из двух семейств: разделяемая память с защитой (`sync.Mutex`, `sync.RWMutex`, `sync/atomic`, `sync.Once`, `sync.Cond`) и передача данных между goroutine (`chan`, `select`). Плюс координация жизненного цикла: `sync.WaitGroup`, `context`, `errgroup`. Выбор определяется задачей: защитить состояние, передать данные, дождаться завершения или отменить работу.",
+  "mental_model": {
+    "type": "tree",
+    "description": "Примитивы группируются по задаче, которую решают.",
+    "elements": [
+      "Синхронизация",
+      "Защита состояния",
+      "Передача данных",
+      "Ожидание и отмена"
+    ],
+    "relations": [
+      "Синхронизация -> Защита состояния",
+      "Синхронизация -> Передача данных",
+      "Синхронизация -> Ожидание и отмена",
+      "Защита состояния -> Mutex / RWMutex",
+      "Защита состояния -> atomic",
+      "Защита состояния -> Once",
+      "Передача данных -> channel",
+      "Передача данных -> select",
+      "Ожидание и отмена -> WaitGroup",
+      "Ожидание и отмена -> context",
+      "Ожидание и отмена -> errgroup"
+    ],
+    "table": {
+      "columns": [
+        "Задача",
+        "Примитив",
+        "Пример"
+      ],
+      "rows": [
+        [
+          "Защитить общее состояние",
+          "sync.Mutex",
+          "map-кэш, несколько связанных полей"
+        ],
+        [
+          "Много чтений, редкие записи",
+          "sync.RWMutex",
+          "конфиг, справочник"
+        ],
+        [
+          "Одно число/флаг",
+          "sync/atomic",
+          "счётчик, флаг остановки"
+        ],
+        [
+          "Однократная инициализация",
+          "sync.Once",
+          "ленивый клиент/подключение"
+        ],
+        [
+          "Передать данные/владение",
+          "chan",
+          "pipeline, worker pool"
+        ],
+        [
+          "Дождаться N goroutine",
+          "sync.WaitGroup",
+          "fan-out и сбор"
+        ],
+        [
+          "Отмена и дедлайны",
+          "context.Context",
+          "таймаут запроса"
+        ],
+        [
+          "Группа задач с ошибкой",
+          "errgroup.Group",
+          "параллельные вызовы API"
+        ]
+      ]
+    }
+  },
+  "problem": {
+    "question": "Несколько goroutine работают с общими данными и зависят друг от друга. Как гарантировать корректность, дождаться завершения и уметь всё отменить?",
+    "context": "Без синхронизации — data race; без координации — утечки goroutine и ожидание вечно.",
+    "why_it_matters": "Выбор неправильного примитива даёт либо гонки, либо лишнюю сложность и contention."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Mutex / RWMutex",
+        "description": "Критическая секция: в каждый момент её выполняет одна goroutine (RWMutex допускает много читателей или одного писателя). Lock/Unlock создают happens-before между секциями."
+      },
+      {
+        "order": 2,
+        "title": "atomic",
+        "description": "Неделимые операции над одним значением (`Add`, `Load`, `Store`, `CompareAndSwap`), без блокировок. Подходит для счётчиков и флагов, но не для инвариантов между несколькими полями."
+      },
+      {
+        "order": 3,
+        "title": "Once",
+        "description": "`once.Do(f)` гарантирует, что f выполнится ровно один раз, а остальные вызовы дождутся её завершения."
+      },
+      {
+        "order": 4,
+        "title": "Channel",
+        "description": "Передача значения из одной goroutine в другую с синхронизацией. Unbuffered — рандеву отправителя и получателя; buffered — очередь фиксированной ёмкости. `select` ждёт одну из нескольких операций."
+      },
+      {
+        "order": 5,
+        "title": "WaitGroup",
+        "description": "Счётчик незавершённых задач: `Add(n)` до запуска, `Done()` в конце, `Wait()` блокирует до нуля."
+      },
+      {
+        "order": 6,
+        "title": "context и errgroup",
+        "description": "`context` распространяет отмену и дедлайн вниз по вызовам. `errgroup` запускает группу goroutine, возвращает первую ошибку и (через `WithContext`) отменяет остальные."
+      }
+    ],
+    "key_objects": [
+      "sync.Mutex",
+      "sync.RWMutex",
+      "sync/atomic",
+      "sync.Once",
+      "sync.WaitGroup",
+      "chan",
+      "context.Context",
+      "errgroup.Group",
+      "sync.Cond"
+    ],
+    "important_distinctions": [
+      "WaitGroup ждёт завершения, но не защищает данные.",
+      "atomic защищает одно значение, mutex — инвариант из нескольких полей.",
+      "Semaphore можно сделать buffered channel'ом ёмкости N или взять `golang.org/x/sync/semaphore`."
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "g, ctx := errgroup.WithContext(ctx)\nsem := make(chan struct{}, 10) // не больше 10 одновременно\nfor _, id := range ids {\n    g.Go(func() error {\n        sem <- struct{}{}\n        defer func() { <-sem }()\n        return fetch(ctx, id)\n    })\n}\nif err := g.Wait(); err != nil {\n    return err\n}",
+    "explanation": "errgroup координирует группу и отменяет ctx при первой ошибке; buffered channel ограничивает параллельность (semaphore). Код рассчитан на Go ≥ 1.22 (переменная цикла на итерацию).",
+    "expected_result": null
+  },
+  "details": [
+    {
+      "title": "Mutex нельзя копировать",
+      "description": "Копия mutex — независимый lock, защита перестаёт работать. Структуры с mutex передают по указателю; `go vet` (copylocks) ловит копирование.",
+      "importance": "critical"
+    },
+    {
+      "title": "wg.Add до запуска goroutine",
+      "description": "`wg.Add(1)` вызывают до `go f()`, а не внутри goroutine: иначе `Wait` может вернуться раньше, чем goroutine успела сделать Add.",
+      "importance": "critical"
+    },
+    {
+      "title": "Не держать lock во время I/O",
+      "description": "Сетевой вызов или запрос в БД под mutex сериализует всех ожидающих и раздувает latency. Под lock — только работа с памятью.",
+      "importance": "important"
+    },
+    {
+      "title": "RWMutex не всегда быстрее",
+      "description": "При коротких критических секциях или частых записях RWMutex может проигрывать обычному Mutex из-за дополнительного учёта читателей. Решение — по профилю.",
+      "importance": "secondary"
+    },
+    {
+      "title": "sync.Cond",
+      "description": "Ожидание условия с broadcast/signal. Используется редко: чаще задачу проще решить каналом.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Каждый `Lock()` имеет парный `Unlock()` на всех путях выполнения.",
+      "why": "Иначе следующие захватчики заблокируются навсегда. Отсюда идиома `defer mu.Unlock()`."
+    },
+    {
+      "statement": "Сумма `Add` равна количеству `Done` к моменту `Wait`.",
+      "why": "Иначе Wait зависнет, а при уходе счётчика в минус будет panic."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "go-sync-primitives-fm-wg-add-inside",
+      "title": "wg.Add внутри goroutine",
+      "cause": "`go func() { wg.Add(1); defer wg.Done(); ... }()`",
+      "symptom": "`Wait()` иногда возвращается раньше, чем работа выполнена; результаты теряются.",
+      "mechanism": "Main может дойти до Wait при счётчике 0, пока goroutine ещё не выполнила Add.",
+      "fix": "Вызывать `wg.Add(1)` в родительской goroutine до `go`. В Go 1.25+ есть `wg.Go(f)`, который делает это сам.",
+      "prevention": "Линтеры, код-ревью, идиома Add→go→defer Done."
+    },
+    {
+      "id": "go-sync-primitives-fm-copy-mutex",
+      "title": "Копирование mutex",
+      "cause": "Метод с value receiver у структуры с `sync.Mutex` или передача структуры по значению.",
+      "symptom": "Data race, хотя везде есть Lock/Unlock.",
+      "mechanism": "Каждая копия имеет свой mutex, поэтому goroutine блокируют разные lock'и.",
+      "fix": "Pointer receiver, передавать `*T`.",
+      "prevention": "`go vet` (copylocks)."
+    },
+    {
+      "id": "go-sync-primitives-fm-lock-io",
+      "title": "I/O под lock",
+      "cause": "Вызов внешнего сервиса внутри критической секции.",
+      "symptom": "Рост latency всех запросов, goroutine копятся в ожидании mutex.",
+      "mechanism": "Критическая секция длится столько же, сколько сетевой вызов, и все остальные ждут последовательно.",
+      "fix": "Вынести I/O за пределы lock, под lock только чтение и обновление памяти.",
+      "prevention": "Профиль `mutex`/`block` в pprof."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Mutex — простая модель «одна goroutine в секции», подходит для любых инвариантов.",
+      "atomic — минимальная цена для одиночных значений.",
+      "Channel — явная передача владения, естественен для pipeline и очередей."
+    ],
+    "costs": [
+      "Mutex — contention при высокой конкуренции.",
+      "atomic — только простые операции, легко ошибиться со смешанным доступом.",
+      "Channel — дороже mutex на операцию, риск deadlock и утечек при неправильном закрытии."
+    ],
+    "risks": [
+      "Deadlock при неправильном порядке захвата или забытом Unlock.",
+      "Goroutine leak при забытой отмене или незакрытом канале."
+    ],
+    "when_tradeoff_matters": "На горячих путях с высокой конкуренцией и при проектировании жизненного цикла goroutine."
+  },
+  "usage": {
+    "use_when": [
+      "Mutex — защищаешь состояние (особенно несколько связанных полей).",
+      "atomic — счётчик, флаг, указатель на неизменяемый снапшот конфига.",
+      "Channel — передаёшь данные или сигнал между goroutine.",
+      "WaitGroup/errgroup — ждёшь группу задач; context — нужна отмена и таймаут."
+    ],
+    "avoid_when": [
+      "Channel для защиты простого счётчика — избыточно.",
+      "atomic для инварианта из нескольких полей — не защищает связь между ними."
+    ],
+    "signals": [
+      "Есть разделяемая переменная и хотя бы один писатель → нужна синхронизация.",
+      "Есть producer и consumer → channel.",
+      "Нужно «дождаться всех» → WaitGroup/errgroup."
+    ],
+    "production_considerations": [
+      "Проверять contention через pprof mutex/block профили.",
+      "Всегда передавать context в долгие операции."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "go-mutex",
+      "dimension": "Назначение",
+      "difference": "Mutex — один из примитивов для защиты общего состояния; этот концепт — карта всех примитивов и критерии выбора.",
+      "why_it_matters": "На вопрос «какие примитивы знаете» нужен обзор, а на «когда mutex, когда channel» — критерий выбора."
+    },
+    {
+      "concept_id": "go-channel",
+      "dimension": "Модель",
+      "difference": "Channel — синхронизация через передачу данных, остальные примитивы — через защиту разделяемой памяти.",
+      "why_it_matters": "Разные модели подходят для разных задач; ни одна не лучше в общем случае."
+    }
+  ],
+  "claims": [
+    {
+      "id": "go-sync-primitives-claim-01",
+      "statement": "В Go 1.25 добавлен метод `sync.WaitGroup.Go(f)`, который вызывает Add(1), запускает f в goroutine и вызывает Done.",
+      "status": "uncertain",
+      "notes": "Проверить по release notes версии Go, используемой в проекте."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "go-sync-primitives-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Какие примитивы синхронизации в Go знаете?",
+      "context": null,
+      "expected_answer": "Из пакета sync: Mutex, RWMutex, WaitGroup, Once, Cond, sync.Map; пакет sync/atomic. Channel и select — синхронизация через передачу данных. Для координации — context (отмена, дедлайны) и errgroup. Semaphore можно сделать buffered channel'ом.",
+      "key_points": [
+        "Mutex / RWMutex",
+        "WaitGroup",
+        "Once",
+        "atomic",
+        "channel + select",
+        "context / errgroup"
+      ],
+      "common_mistakes": [
+        "Назвать только channel и mutex.",
+        "Считать WaitGroup способом защиты данных."
+      ],
+      "hints": [
+        "Раздели на три группы: защита состояния, передача данных, ожидание/отмена."
+      ],
+      "follow_up": "Когда какой используете?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ]
+    },
+    {
+      "id": "go-sync-primitives-q-02",
+      "type": "explain",
+      "level": "L3",
+      "question": "Когда какой примитив используете?",
+      "context": null,
+      "expected_answer": "По задаче. Защитить общее состояние (особенно несколько связанных полей) — Mutex; много чтений и редкие записи — RWMutex (после проверки профилем). Одно число или флаг — atomic. Однократная инициализация — Once. Передать данные или владение между goroutine, pipeline, worker pool — channel. Дождаться группы goroutine — WaitGroup, с ошибками и отменой — errgroup. Отмена и таймауты — context.",
+      "key_points": [
+        "состояние → mutex",
+        "одно значение → atomic",
+        "передача данных → channel",
+        "ожидание → WaitGroup/errgroup",
+        "отмена → context"
+      ],
+      "common_mistakes": [
+        "«Channels всегда лучше mutex»."
+      ],
+      "hints": [],
+      "follow_up": "Почему для счётчика не стоит использовать channel?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "decision"
+      ]
+    },
+    {
+      "id": "go-sync-primitives-q-03",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что может напечатать программа и почему?",
+      "context": null,
+      "code": "func main() {\n    var wg sync.WaitGroup\n    results := make([]int, 3)\n    for i := 0; i < 3; i++ {\n        go func(i int) {\n            wg.Add(1)\n            defer wg.Done()\n            results[i] = i * 10\n        }(i)\n    }\n    wg.Wait()\n    fmt.Println(results)\n}",
+      "code_language": "go",
+      "expected_answer": "Может напечатать `[0 0 0]`, частично заполненный slice или `[0 10 20]` — недетерминированно. `wg.Add(1)` вызывается внутри goroutine, поэтому main может дойти до `Wait()`, пока счётчик ещё 0, и вернуться сразу. Кроме того, это data race на `results`. Исправление: `wg.Add(1)` перед `go`.",
+      "key_points": [
+        "Add внутри goroutine",
+        "Wait может вернуться сразу",
+        "недетерминированный результат",
+        "Add до go"
+      ],
+      "common_mistakes": [
+        "Ответить «всегда [0 10 20]»."
+      ],
+      "hints": [
+        "В какой момент счётчик WaitGroup становится ненулевым?"
+      ],
+      "follow_up": null,
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "predict",
+        "code"
+      ]
+    },
+    {
+      "id": "go-sync-primitives-q-04",
+      "type": "debug",
+      "level": "L4",
+      "question": "Везде стоят Lock/Unlock, но `-race` всё равно показывает гонку на `hits`. Почему?",
+      "context": null,
+      "code": "type Stats struct {\n    mu   sync.Mutex\n    hits int\n}\n\nfunc (s Stats) Inc() {\n    s.mu.Lock()\n    defer s.mu.Unlock()\n    s.hits++\n}",
+      "code_language": "go",
+      "expected_answer": "Value receiver: при каждом вызове `Inc` копируется вся структура вместе с mutex. Каждая goroutine блокирует свою копию mutex и увеличивает свою копию `hits`, поэтому исходное поле не изменяется, а реальный доступ к исходной структуре при копировании не синхронизирован. Исправление: pointer receiver `func (s *Stats) Inc()`. `go vet` (copylocks) предупреждает о копировании lock.",
+      "key_points": [
+        "value receiver копирует mutex",
+        "каждая копия — свой lock",
+        "pointer receiver",
+        "go vet copylocks"
+      ],
+      "common_mistakes": [
+        "Искать проблему в defer."
+      ],
+      "hints": [
+        "Что происходит со структурой при вызове метода с value receiver?"
+      ],
+      "follow_up": "Какой ещё инструмент кроме -race это найдёт?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "debug",
+        "code"
+      ]
+    },
+    {
+      "id": "go-sync-primitives-q-05",
+      "type": "design",
+      "level": "L5",
+      "question": "Нужно параллельно запросить данные у 3 внешних сервисов для одного HTTP-запроса. Если любой упал — отменить остальные и вернуть ошибку; общий таймаут 2 секунды. Какие примитивы используешь и как?",
+      "context": null,
+      "expected_answer": "`context.WithTimeout(r.Context(), 2*time.Second)` — общий дедлайн. `errgroup.WithContext(ctx)` — запуск трёх вызовов через `g.Go`, каждый получает ctx; первая ошибка отменяет ctx, остальные вызовы прерываются. Результаты пишутся в отдельные переменные или индексы slice (разные ячейки — без гонки) или под mutex. `g.Wait()` возвращает первую ошибку. Все клиенты обязаны уважать ctx, иначе отмена не сработает.",
+      "key_points": [
+        "context.WithTimeout",
+        "errgroup.WithContext",
+        "первая ошибка отменяет остальных",
+        "клиенты должны принимать ctx",
+        "результаты без гонки"
+      ],
+      "common_mistakes": [
+        "WaitGroup без отмены — упавший сервис не прерывает остальные.",
+        "Забыть передать ctx в HTTP-клиент."
+      ],
+      "hints": [],
+      "follow_up": "Что будет, если один из клиентов игнорирует ctx?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "design"
+      ]
+    },
+    {
+      "id": "go-sync-primitives-q-06",
+      "type": "decision",
+      "level": "L6",
+      "question": "Конфиг сервиса читается на каждом запросе (десятки тысяч RPS) и обновляется раз в минуту. Что выберешь для синхронизации и почему?",
+      "context": "Вариант A: `sync.Mutex` вокруг чтения и записи.\nВариант B: `sync.RWMutex`.\nВариант C: `atomic.Pointer[Config]` с неизменяемыми снапшотами (copy-on-write).",
+      "expected_answer": "C — оптимально: читатели делают `Load()` без блокировок, писатель собирает новый неизменяемый Config и делает `Store()`. Нет contention на горячем пути. Условие — Config после публикации не мутируется. B лучше A для read-heavy, но всё равно даёт накладные расходы на учёт читателей. A сериализует всех читателей. Trade-off C: выделение нового объекта на обновление и дисциплина неизменяемости.",
+      "key_points": [
+        "read-heavy горячий путь",
+        "atomic.Pointer + immutable snapshot",
+        "RWMutex как компромисс",
+        "условие неизменяемости"
+      ],
+      "common_mistakes": [
+        "Мутировать объект после Store — снова гонка."
+      ],
+      "hints": [],
+      "follow_up": "Как гарантируешь, что никто не мутирует опубликованный Config?",
+      "priority": "secondary",
+      "difficulty": 5,
+      "tags": [
+        "expert",
+        "decision"
+      ]
+    }
+  ],
+  "worked_examples": [],
+  "practice": [
+    {
+      "id": "go-sync-primitives-pr-01",
+      "type": "code",
+      "title": "Ограниченная параллельная обработка",
+      "task": "Напиши функцию `ProcessAll(ctx context.Context, ids []string, fn func(context.Context, string) error) error`, которая обрабатывает ids параллельно, не больше 5 одновременно, возвращает первую ошибку и отменяет остальную работу.",
+      "constraints": [
+        "Не больше 5 одновременных вызовов fn.",
+        "При первой ошибке остальные вызовы получают отменённый ctx.",
+        "Нет утечек goroutine."
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "errgroup.WithContext для первой ошибки и отмены; `g.SetLimit(5)` (или semaphore на buffered channel) для ограничения. Каждая задача проверяет ctx.",
+        "code": "func ProcessAll(ctx context.Context, ids []string, fn func(context.Context, string) error) error {\n    g, ctx := errgroup.WithContext(ctx)\n    g.SetLimit(5)\n    for _, id := range ids {\n        g.Go(func() error {\n            return fn(ctx, id)\n        })\n    }\n    return g.Wait()\n}"
+      },
+      "evaluation_points": [
+        "Ограничение параллельности (SetLimit или semaphore)",
+        "Отмена через ctx при первой ошибке",
+        "Ожидание всех goroutine перед возвратом",
+        "Переменная цикла корректна (Go ≥ 1.22 или передача параметром)"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "race-condition",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "go-mutex",
+      "relation": "next"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "next"
+    },
+    {
+      "concept_id": "deadlock",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Сервис на каждый запрос параллельно ходит в три внешних API, складывает результаты в общий кэш и считает метрики. Goroutine много, и все они что-то делят или чего-то ждут друг от друга.\n\nПройдём по бедам, которые при этом возникают. Каждая беда даст свой инструмент из стандартной библиотеки — так и соберётся весь список примитивов.",
+    "beats": [
+      {
+        "problem": "Несколько goroutine читают и пишут один map-кэш. Под нагрузкой процесс падает с `concurrent map writes`. **Как пускать к map только одну goroutine за раз?**",
+        "solution": "Поставить замок на участок кода, который работает с map: вошла одна goroutine — остальные ждут у входа, пока она не выйдет.\n```go\nc.mu.Lock()\nc.data[k] = v\nc.mu.Unlock()\n```",
+        "term": "sync.Mutex; критическая секция",
+        "analogy": "Туалет в самолёте: табличка «занято», остальные ждут в проходе."
+      },
+      {
+        "problem": "Кэш читают тысячи раз в секунду, а обновляют раз в минуту. **Зачем читателям ждать друг друга, если они ничего не меняют?**",
+        "solution": "Незачем. Другой вид замка пускает внутрь сколько угодно читателей одновременно или одного писателя. Писатель ждёт, пока выйдут все читатели, и на время записи закрывает вход всем.\n\nВыигрыш не гарантирован: при коротких секциях учёт читателей может стоить дороже, поэтому решают по профилю.",
+        "term": "sync.RWMutex (RLock / Lock)",
+        "analogy": "Зал музея: смотреть картины могут многие одновременно, но пока меняют экспозицию, зал закрыт для всех."
+      },
+      {
+        "problem": "Нужно просто считать обработанные сообщения. **Брать ради одного числа целый mutex?**",
+        "solution": "Не обязательно. Для одного числа или флага есть неделимые операции: прибавить, прочитать, записать, сравнить-и-заменить — без блокировок.\n```go\nvar processed atomic.Int64\nprocessed.Add(1)\n```\nНо atomic защищает только одно значение. Если два поля должны меняться вместе — счётчик и время последнего сообщения, — нужен mutex.",
+        "term": "sync/atomic"
+      },
+      {
+        "problem": "Клиент к внешнему сервису создаётся лениво, при первом запросе. Сто запросов пришли одновременно. **Как создать клиент ровно один раз?**",
+        "solution": "`once.Do(f)` выполняет f ровно один раз. Остальные вызовы ждут, пока первый закончит, и дальше работают с готовым результатом.\n```go\nonce.Do(func() { client = newClient() })\n```",
+        "term": "sync.Once"
+      },
+      {
+        "problem": "Main запустил три goroutine за данными. **Как дождаться, пока все закончат?**",
+        "solution": "Завести счётчик незавершённых задач: `Add(1)` перед каждым `go`, `Done()` в конце goroutine, `Wait()` блокируется, пока счётчик не станет нулём.\n\nWaitGroup только ждёт — данные она не защищает. И `Add` вызывают до `go`, а не внутри goroutine, иначе `Wait` может проскочить раньше времени.",
+        "term": "sync.WaitGroup",
+        "analogy": "Экскурсовод пересчитывает группу перед отъездом: пока все не вернулись, автобус стоит."
+      },
+      {
+        "problem": "Одна goroutine читает строки из файла, другие их обрабатывают. **Как передавать работу, не заводя общую очередь под lock?**",
+        "solution": "Через channel: одна goroutine кладёт значение, другая забирает. Отправка и получение сами синхронизируют goroutine, а данные переходят из рук в руки — делить нечего. Оператор select позволяет ждать сразу несколько событий: новое значение, отмену или таймаут.",
+        "term": "channel, select",
+        "analogy": "Конвейер между цехами: один цех кладёт детали, другой забирает."
+      },
+      {
+        "problem": "Один из трёх внешних API вернул ошибку. **Как остановить два других вызова и не ждать их зря?**",
+        "solution": "Передать во все вызовы общий `context`: при отмене или по дедлайну все, кто его слушает, прекращают работу. `errgroup` объединяет это с ожиданием — запускает goroutine, возвращает первую ошибку и отменяет контекст для остальных.\n```go\ng, ctx := errgroup.WithContext(ctx)\ng.Go(func() error { return callA(ctx) })\ng.Go(func() error { return callB(ctx) })\nif err := g.Wait(); err != nil {\n    return err\n}\n```",
+        "term": "context.Context, errgroup"
+      },
+      {
+        "problem": "**Чем заплатили за такой набор инструментов?**",
+        "solution": "У каждого своя ловушка. Mutex — contention и deadlock при разном порядке захвата. Atomic — только одно значение. Channel дороже mutex на операцию, а неправильное закрытие даёт panic и утечки goroutine. WaitGroup зависает, если `Done` вызван не на всех путях.\n\nПоэтому примитив выбирают по задаче: защитить состояние, передать данные, дождаться или отменить.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Из пакета sync: Mutex, RWMutex, WaitGroup, Once, Cond, sync.Map; пакет sync/atomic. Channel и select — синхронизация через передачу данных. Для координации — context (отмена, дедлайны) и errgroup. Semaphore можно сделать buffered channel'ом.\n\nВыбор — по задаче. Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine."
+  },
+  "short_answer": {
+    "junior": "Примитивы синхронизации нужны, чтобы goroutine не мешали друг другу. Mutex пускает к общим данным только одну goroutine за раз, WaitGroup позволяет дождаться завершения группы goroutine, channel передаёт данные от одной goroutine к другой. Для простых счётчиков есть atomic.",
+    "middle": "Из пакета sync: Mutex, RWMutex, WaitGroup, Once, Cond, sync.Map; пакет sync/atomic. Channel и select — синхронизация через передачу данных. Для координации — context (отмена, дедлайны) и errgroup. Semaphore можно сделать buffered channel'ом.\n\nКак выбирать — по задаче:\n- защитить общее состояние, особенно несколько связанных полей, — Mutex; много чтений и редкие записи — RWMutex;\n- одно число или флаг — atomic;\n- однократная инициализация — Once;\n- передать данные или владение (pipeline, worker pool) — channel;\n- дождаться группы goroutine — WaitGroup, с ошибками и отменой — errgroup;\n- отмена и таймауты — context.",
+    "senior": "Всё из middle, плюс:\n- Mutex нельзя копировать: при value receiver или передаче структуры по значению у каждой копии свой lock. Копирование ловит `go vet` (copylocks).\n- `wg.Add` — до `go`, а не внутри goroutine, иначе `Wait` может вернуться раньше времени. Каждый `Lock` — с парным `Unlock` на всех путях, отсюда `defer mu.Unlock()`.\n- Под lock не делают I/O: сетевой вызов в критической секции сериализует всех ожидающих. Contention видно в pprof mutex/block профилях.\n- RWMutex не всегда быстрее Mutex: при коротких секциях и частых записях он проигрывает из-за учёта читателей. Для read-heavy конфига часто лучше `atomic.Pointer` на неизменяемый снапшот.\n- atomic не защищает инвариант из нескольких полей, а atomic-запись вместе с обычным чтением той же переменной — снова data race.\n- Channel дороже mutex на операцию и требует продуманного владения: закрывает отправитель, иначе panic или утечки goroutine.\n- Отмена работает, только если все вызовы принимают и уважают `ctx`.",
+    "visuals": {
+      "middle": [
+        {
+          "title": "Какой примитив выбрать",
+          "mermaid": "flowchart LR\n  q{\"Что нужно?\"}\n  q -->|\"защитить общее состояние\"| st{\"Одно число<br/>или флаг?\"}\n  st -->|да| at[\"sync/atomic\"]\n  st -->|\"нет, несколько полей\"| rw{\"Чтений намного<br/>больше записей?\"}\n  rw -->|нет| mu[\"sync.Mutex\"]\n  rw -->|да| rwm[\"sync.RWMutex\"]\n  q -->|\"инициализировать один раз\"| once[\"sync.Once\"]\n  q -->|\"передать данные или владение\"| ch[\"channel\"]\n  q -->|\"дождаться группы goroutine\"| wg{\"Нужны ошибки<br/>и отмена?\"}\n  wg -->|нет| wgn[\"sync.WaitGroup\"]\n  wg -->|да| eg[\"errgroup\"]\n  q -->|\"отмена и таймауты\"| ctx[\"context\"]",
+          "caption": "Примитив выбирают по задаче: защита состояния, ожидание, передача данных или отмена."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Почему wg.Add вызывают до go",
+          "mermaid": "sequenceDiagram\n  participant M as main\n  participant W as WaitGroup\n  participant G as goroutine\n  M->>G: go worker()\n  M->>W: Wait() — счётчик 0, сразу возврат\n  Note over M: main идёт дальше, не дождавшись работы\n  G->>W: Add(1) — уже поздно\n  G->>W: Done()",
+          "steps": [
+            "main запускает goroutine, а `wg.Add(1)` написан внутри неё.",
+            "Новая goroutine ещё не успела стартовать, а main уже в `Wait()`: счётчик 0, ждать нечего — возврат сразу.",
+            "main продолжает работу, будто всё завершилось, хотя работа ещё не начиналась.",
+            "Goroutine наконец стартует и делает `Add(1)` — но `Wait` уже вернулся.",
+            "`Done()` уже ни на что не влияет. Правильно: `wg.Add(1)` перед `go`, `defer wg.Done()` внутри."
+          ],
+          "caption": "Если `Add` внутри goroutine, планировщик может выполнить `Wait` раньше него — поэтому `Add` вызывают до `go`."
+        }
+      ]
+    }
+  }
+}

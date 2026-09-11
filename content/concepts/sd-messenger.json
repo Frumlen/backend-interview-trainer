@@ -1,0 +1,811 @@
+{
+  "id": "sd-messenger",
+  "title": "System design: мессенджер",
+  "domain": "System Design",
+  "level": "L5",
+  "tags": [
+    "system-design",
+    "messenger",
+    "kafka",
+    "idempotency",
+    "ordering"
+  ],
+  "prerequisites": [
+    "system-design-approach"
+  ],
+  "summary": "Мессенджер — система доставки сообщений с гарантией at-least-once и порядком внутри диалога. Минимальная схема: Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient. Сообщения хранятся в persistent storage (PostgreSQL / distributed storage), порядок обеспечивается партиционированием по conversation_id, повторная доставка — idempotent обработкой по message_id.",
+  "mental_model": {
+    "type": "data_flow",
+    "description": "Сообщение проходит путь от отправителя через сервис сообщений в Kafka и дальше к получателю. Хранилище — источник истины для офлайн-получателей и истории.",
+    "elements": [
+      "Client",
+      "API Gateway",
+      "Message Service",
+      "Storage",
+      "Kafka",
+      "Delivery Service",
+      "Recipient"
+    ],
+    "relations": [
+      "Client -> API Gateway",
+      "API Gateway -> Message Service",
+      "Message Service -> Storage: persistent storage",
+      "Message Service -> Kafka: key = conversation_id",
+      "Kafka -> Delivery Service",
+      "Delivery Service -> Recipient: online — сразу, offline — при подключении"
+    ],
+    "diagram": "Sender\n  │\n  ▼\nAPI Gateway\n  │\n  ▼\nMessage Service ──save──► Storage\n  │                      (PostgreSQL /\n  │ publish               distributed)\n  │ key = conversation_id\n  ▼\nKafka (partitions)\n  │\n  ▼\nDelivery Service\n  ├─ online  ──► Recipient\n  └─ offline ──► ждём подключения,\n                 отдаём непрочитанные",
+    "table": null
+  },
+  "problem": {
+    "question": "Как доставить сообщение от одного пользователя другому так, чтобы оно не потерялось, пришло в правильном порядке, не задублировалось у получателя и дошло, даже если получатель офлайн?",
+    "context": "Получатель может быть офлайн, серверы и сеть падают, клиенты повторяют отправку. Сообщения одного диалога должны идти по порядку.",
+    "why_it_matters": "Это классическая задача, где сходятся асинхронная доставка, порядок, idempotency, хранение и масштабирование. По ней проверяют понимание Kafka и delivery semantics на практике."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Требования и допущения",
+        "description": "Уточняем: личные сообщения или группы, нужна ли история, online status, гарантия порядка, масштаб. Допущения: личные сообщения, история хранится, сообщения доставляются хотя бы один раз, порядок внутри диалога сохраняем."
+      },
+      {
+        "order": 2,
+        "title": "Отправка",
+        "description": "Client → API Gateway → Message Service. Message Service сохраняет сообщение в persistent storage и публикует его в Kafka."
+      },
+      {
+        "order": 3,
+        "title": "Порядок",
+        "description": "Партиционируем сообщения по conversation_id: сообщения одного диалога попадают в одну Kafka partition и обрабатываются последовательно в рамках partition."
+      },
+      {
+        "order": 4,
+        "title": "Доставка",
+        "description": "Delivery Service читает Kafka и доставляет сообщение получателю (Recipient)."
+      },
+      {
+        "order": 5,
+        "title": "Получатель offline",
+        "description": "Сообщение уже сохранено в persistent storage. Когда пользователь подключается, Delivery Service доставляет непрочитанные сообщения."
+      },
+      {
+        "order": 6,
+        "title": "Повторная доставка",
+        "description": "Обработка idempotent: у сообщения есть уникальный message_id, consumer проверяет, не было ли оно уже обработано."
+      },
+      {
+        "order": 7,
+        "title": "Статусы delivered / read",
+        "description": "Храним message_id, sender_id, recipient_id, created_at, delivered_at, read_at. delivered_at и read_at проставляются по событиям от клиента получателя."
+      },
+      {
+        "order": 8,
+        "title": "Долгоживущие соединения",
+        "description": "Клиенты держат WebSocket (или другое long-lived соединение) с gateway. Connection registry хранит, какой gateway-инстанс держит соединение пользователя, и Delivery Service отправляет сообщение через нужный инстанс."
+      },
+      {
+        "order": 9,
+        "title": "Client-generated message_id и ack",
+        "description": "Клиент генерирует message_id до отправки, поэтому retry после таймаута не создаёт новое сообщение. Клиент получателя присылает ack → delivered_at, а при открытии чата — read → read_at."
+      },
+      {
+        "order": 10,
+        "title": "Sequence number в диалоге",
+        "description": "Сервер присваивает сообщению монотонный номер внутри conversation. Клиент сортирует по нему и видит пропуски, которые можно дозапросить."
+      }
+    ],
+    "key_objects": [
+      "message_id",
+      "conversation_id",
+      "API Gateway",
+      "Message Service",
+      "Kafka partition",
+      "Delivery Service",
+      "persistent storage",
+      "delivered_at",
+      "read_at"
+    ],
+    "important_distinctions": [
+      "Порядок гарантируется внутри partition, а не во всём топике",
+      "At-least-once означает возможные дубликаты — их убирает idempotent consumer, а не Kafka",
+      "Kafka — транспорт, persistent storage — история и источник для офлайн-доставки",
+      "delivered — сообщение дошло до устройства (ack), read — пользователь открыл чат"
+    ]
+  },
+  "minimal_example": {
+    "language": "text",
+    "code": "messages\n  message_id     -- уникальный, ключ дедупликации\n  conversation_id\n  sender_id\n  recipient_id\n  created_at\n  delivered_at   -- NULL, пока не доставлено\n  read_at        -- NULL, пока не прочитано",
+    "explanation": "Минимальная модель сообщения. message_id делает обработку idempotent, conversation_id используется как ключ партиционирования для порядка, delivered_at и read_at дают статусы.",
+    "expected_result": null
+  },
+  "details": [
+    {
+      "title": "Партиционирование по conversation_id",
+      "description": "Главный ответ про порядок: сообщения одного диалога — в одной partition, поэтому обрабатываются последовательно. Порядок между разными диалогами не нужен.",
+      "importance": "critical"
+    },
+    {
+      "title": "At-least-once + idempotency",
+      "description": "Сообщение не должно теряться, поэтому возможны повторы. Consumer проверяет message_id и не обрабатывает сообщение дважды.",
+      "importance": "critical"
+    },
+    {
+      "title": "Хранение — до доставки",
+      "description": "Офлайн-получатель — нормальный случай: сообщение сохраняется в persistent storage и доставляется при подключении.",
+      "importance": "critical"
+    },
+    {
+      "title": "Dual write: storage + Kafka",
+      "description": "Если сервис пишет в БД и публикует в Kafka двумя отдельными операциями, падение между ними даёт рассинхрон. Решения: transactional outbox (запись события в ту же транзакцию БД, отдельный relay публикует в Kafka) или хранение, которое наполняется из Kafka consumer.",
+      "importance": "important"
+    },
+    {
+      "title": "Группы и hot chats",
+      "description": "В групповом чате одно сообщение доставляется всем участникам (fan-out). Очень активный чат нагружает одну partition, потому что весь диалог идёт через один ключ.",
+      "importance": "important"
+    },
+    {
+      "title": "Шардирование хранилища по conversation_id",
+      "description": "История читается по диалогу, поэтому ключ шардирования conversation_id держит сообщения диалога на одном шарде, и чтение истории не требует scatter-gather.",
+      "importance": "important"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Все сообщения одного диалога проходят через одну partition",
+      "why": "Kafka гарантирует порядок только внутри partition. Ключ conversation_id отправляет диалог в одну partition."
+    },
+    {
+      "statement": "Повторная обработка сообщения с тем же message_id не меняет результат",
+      "why": "Доставка at-least-once допускает повторы, а idempotent consumer делает их безопасными."
+    },
+    {
+      "statement": "Сообщение сохранено в persistent storage до того, как отправитель получил подтверждение",
+      "why": "Иначе падение сервиса после подтверждения теряет сообщение, а офлайн-получатель его не получит."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "sd-messenger-fm-duplicates",
+      "title": "Дубли сообщений у получателя",
+      "cause": "Доставка at-least-once (retry клиента, повторное чтение из Kafka после падения consumer), а consumer не проверяет message_id.",
+      "symptom": "Получатель видит одно и то же сообщение дважды.",
+      "mechanism": "Одно сообщение обрабатывается повторно: consumer упал после доставки, но до commit offset, или клиент повторил отправку после таймаута.",
+      "fix": "Idempotent обработка: уникальный message_id, consumer проверяет, не было ли сообщение уже обработано (уникальный ключ в хранилище).",
+      "prevention": "message_id генерирует клиент до первой отправки, чтобы retry имели тот же id."
+    },
+    {
+      "id": "sd-messenger-fm-reorder",
+      "title": "Сообщения диалога приходят не по порядку",
+      "cause": "Ключ партиционирования не conversation_id (например, случайный или round-robin), поэтому сообщения одного диалога попадают в разные partitions.",
+      "symptom": "Ответ отображается раньше вопроса.",
+      "mechanism": "Разные partitions обрабатываются параллельно разными consumers, и порядок между ними не гарантирован.",
+      "fix": "Партиционировать по conversation_id. Добавить sequence number в диалоге, по которому клиент сортирует сообщения.",
+      "prevention": null
+    },
+    {
+      "id": "sd-messenger-fm-offline-loss",
+      "title": "Потеря сообщений для офлайн-получателя",
+      "cause": "Сообщение только отправляется в живое соединение и нигде не хранится.",
+      "symptom": "Получатель, который был офлайн, после подключения не видит сообщений.",
+      "mechanism": "Некому доставить сообщение в момент отправки, а источника для повторной доставки нет.",
+      "fix": "Сохранять сообщение в persistent storage; при подключении Delivery Service доставляет непрочитанные.",
+      "prevention": null
+    },
+    {
+      "id": "sd-messenger-fm-gateway-crash",
+      "title": "Падение gateway с открытыми соединениями",
+      "cause": "Инстанс API Gateway, который держит WebSocket-соединения, упал.",
+      "symptom": "Часть пользователей на время теряет связь, доставка им останавливается.",
+      "mechanism": "Соединения живут на конкретном инстансе. Connection registry указывает на мёртвый инстанс, пока клиент не переподключится.",
+      "fix": "Клиент переподключается к другому инстансу через балансировщик, registry обновляется, при подключении досылаются сообщения с delivered_at = NULL.",
+      "prevention": "Heartbeat и TTL записей в connection registry."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Kafka: асинхронность, буферизация, decoupling отправки и доставки",
+      "Порядок внутри диалога через ключ партиционирования",
+      "Офлайн-доставка через persistent storage"
+    ],
+    "costs": [
+      "At-least-once даёт дубликаты — нужна idempotency",
+      "Порядок только внутри диалога, не глобально"
+    ],
+    "risks": [
+      "Hot partition для очень активного чата",
+      "Dual write между БД и Kafka без outbox"
+    ],
+    "when_tradeoff_matters": "Когда выбираешь ключ партиционирования: conversation_id даёт порядок в диалоге, но концентрирует нагрузку активного диалога в одной partition."
+  },
+  "usage": {
+    "use_when": [
+      "Задача «спроектируйте мессенджер / чат / систему уведомлений»"
+    ],
+    "avoid_when": [],
+    "signals": [
+      "Нужна доставка офлайн-пользователям",
+      "Важен порядок внутри сущности (диалог, заказ)",
+      "Повторная доставка должна быть безопасной"
+    ],
+    "production_considerations": [
+      "Мониторинг consumer lag Delivery Service",
+      "Метрики доли недоставленных сообщений и времени доставки",
+      "Лимиты на размер групп"
+    ]
+  },
+  "comparison": [],
+  "claims": [
+    {
+      "id": "sd-messenger-claim-01",
+      "statement": "Партиционирование по conversation_id обеспечивает последовательную обработку сообщений диалога в рамках partition.",
+      "status": "confirmed",
+      "notes": "Верно при условии, что producer всегда пишет с тем же ключом, число partitions не меняется (иначе меняется отображение ключа на partition) и retries producer не переупорядочивают сообщения (idempotent producer)."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "sd-messenger-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Назови минимальную цепочку компонентов, через которую проходит сообщение в мессенджере, и где хранятся сообщения.",
+      "context": null,
+      "expected_answer": "Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient. Хранение — PostgreSQL / distributed storage.",
+      "key_points": [
+        "API Gateway",
+        "Message Service",
+        "Kafka",
+        "Delivery Service",
+        "persistent storage"
+      ],
+      "common_mistakes": [
+        "Пропустить хранилище",
+        "Доставлять напрямую от Message Service без буфера"
+      ],
+      "hints": [],
+      "follow_up": "Зачем здесь Kafka?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-02",
+      "type": "design",
+      "level": "L5",
+      "question": "Спроектируйте систему обмена сообщениями.",
+      "context": "Масштаб не задан — уточни или прими допущения. Пройди все фазы: требования → архитектура → хранение → failure scenarios → масштабирование и observability.",
+      "expected_answer": "Требования: личные сообщения, история хранится, at-least-once, порядок внутри диалога. Архитектура: Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient. Хранение: PostgreSQL / distributed storage, сообщение с message_id, sender_id, recipient_id, created_at, delivered_at, read_at. Offline: сообщение в storage, доставка непрочитанных при подключении. Порядок: партиционирование по conversation_id. Повторная доставка: idempotent consumer по message_id. Масштабирование: stateless-сервисы, горизонтально масштабируемые gateway, шардирование хранилища по conversation_id, consumer lag и время доставки в мониторинге.",
+      "key_points": [
+        "требования и допущения",
+        "схема компонентов",
+        "хранение и поля",
+        "offline",
+        "порядок через conversation_id",
+        "idempotency по message_id",
+        "масштабирование и отказы"
+      ],
+      "common_mistakes": [
+        "Начать с технологий без требований",
+        "Забыть офлайн-получателя",
+        "Не объяснить порядок"
+      ],
+      "hints": [
+        "Сначала пять уточняющих вопросов"
+      ],
+      "follow_up": "Что изменится, если нужны группы на тысячи участников?",
+      "priority": "critical",
+      "difficulty": 5,
+      "tags": [
+        "design"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-03",
+      "type": "short_answer",
+      "level": "L2",
+      "question": "Какие основные требования определим? Какие сущности нам понадобятся?",
+      "context": null,
+      "expected_answer": "Уточнить: личные или группы, история, online status, гарантия порядка, масштаб. Допущения: личные сообщения, история хранится, доставка хотя бы один раз, порядок внутри диалога. Сущности: пользователь, диалог (conversation_id), сообщение: message_id, sender_id, recipient_id, created_at, delivered_at, read_at.",
+      "key_points": [
+        "личные/группы, история, online status, порядок, масштаб",
+        "допущения",
+        "conversation",
+        "message с полями статусов"
+      ],
+      "common_mistakes": [
+        "Забыть delivered_at / read_at",
+        "Не выделить диалог как сущность для порядка"
+      ],
+      "hints": [],
+      "follow_up": "Зачем conversation_id, если есть sender_id и recipient_id?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "requirements"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-04",
+      "type": "explain",
+      "level": "L3",
+      "question": "Как клиент будет отправлять сообщение? Как сообщение будет доставляться получателю?",
+      "context": null,
+      "expected_answer": "Клиент отправляет сообщение через API Gateway в Message Service. Тот сохраняет его в persistent storage и публикует в Kafka с ключом conversation_id. Delivery Service читает Kafka и доставляет получателю. Клиенты держат WebSocket с gateway; connection registry знает, какой инстанс gateway держит соединение получателя; клиент генерирует message_id заранее, чтобы retry не создавал дубль.",
+      "key_points": [
+        "API Gateway → Message Service",
+        "сохранение в storage",
+        "публикация в Kafka",
+        "Delivery Service → Recipient",
+        "WebSocket и connection registry"
+      ],
+      "common_mistakes": [
+        "Синхронно звать сервис получателя из запроса отправки"
+      ],
+      "hints": [],
+      "follow_up": "Как Delivery Service узнаёт, через какой сервер доставить сообщение?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "application"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-05",
+      "type": "explain",
+      "level": "L3",
+      "question": "Что произойдёт, если получатель офлайн?",
+      "context": null,
+      "expected_answer": "Сообщение сохраняем в persistent storage. Когда пользователь подключается, Delivery Service доставляет непрочитанные сообщения (например, с delivered_at = NULL).",
+      "key_points": [
+        "persistent storage",
+        "доставка при подключении",
+        "непрочитанные / недоставленные"
+      ],
+      "common_mistakes": [
+        "Держать сообщение только в памяти или только в Kafka без истории"
+      ],
+      "hints": [],
+      "follow_up": "Как понять, какие именно сообщения ещё не доставлены?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "application"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-06",
+      "type": "explain",
+      "level": "L4",
+      "question": "Как обеспечим порядок сообщений?",
+      "context": null,
+      "expected_answer": "Партиционируем сообщения по conversation_id, чтобы сообщения одного диалога попадали в одну Kafka partition и обрабатывались последовательно в рамках partition. Глобальный порядок не нужен — только внутри диалога. Дополнительно sequence number в диалоге, по которому клиент сортирует сообщения и видит пропуски.",
+      "key_points": [
+        "ключ conversation_id",
+        "одна partition на диалог",
+        "порядок только внутри partition",
+        "sequence number"
+      ],
+      "common_mistakes": [
+        "Обещать глобальный порядок",
+        "Партиционировать по recipient_id или случайно"
+      ],
+      "hints": [
+        "Где Kafka гарантирует порядок?"
+      ],
+      "follow_up": "Что будет с порядком, если увеличить число partitions?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "kafka",
+        "ordering"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-07",
+      "type": "explain",
+      "level": "L4",
+      "question": "Как будем обрабатывать повторную доставку?",
+      "context": null,
+      "expected_answer": "Делаем обработку idempotent: у сообщения есть уникальный message_id, а consumer проверяет, не было ли оно уже обработано. Повторы возможны, потому что выбрана доставка at-least-once: consumer может упасть после обработки, но до commit offset, клиент может повторить отправку.",
+      "key_points": [
+        "idempotent обработка",
+        "уникальный message_id",
+        "проверка «уже обработано»",
+        "причина повторов — at-least-once"
+      ],
+      "common_mistakes": [
+        "Надеяться, что Kafka не создаст дубликат",
+        "Сразу требовать exactly-once"
+      ],
+      "hints": [],
+      "follow_up": "Где хранить признак «уже обработано» и как сделать проверку атомарной?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "idempotency"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-08",
+      "type": "short_answer",
+      "level": "L3",
+      "question": "Как определим, что сообщение доставлено и прочитано?",
+      "context": null,
+      "expected_answer": "Храним у сообщения message_id, sender_id, recipient_id, created_at, delivered_at, read_at. delivered_at проставляется, когда клиент получателя подтвердил получение (ack), read_at — когда пользователь открыл чат; обновление статуса отправляется отправителю как событие.",
+      "key_points": [
+        "delivered_at",
+        "read_at",
+        "ack от клиента",
+        "событие отправителю"
+      ],
+      "common_mistakes": [
+        "Считать доставленным сообщение, которое просто отправлено в сокет без ack"
+      ],
+      "hints": [],
+      "follow_up": null,
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "application"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-09",
+      "type": "explain",
+      "level": "L5",
+      "question": "Где будут храниться сообщения? Как будете распределять данные между серверами?",
+      "context": null,
+      "expected_answer": "Хранение — PostgreSQL / distributed storage. Нагрузка в основном на запись и на чтение истории по диалогу, поэтому шардируем по conversation_id: сообщения диалога лежат на одном шарде, история читается без scatter-gather. Шард определяется хэшем conversation_id или через таблицу маршрутизации. Реплики — для отказоустойчивости и чтения.",
+      "key_points": [
+        "PostgreSQL / distributed storage",
+        "шардирование по conversation_id",
+        "история диалога на одном шарде",
+        "реплики"
+      ],
+      "common_mistakes": [
+        "Шардировать по message_id — история диалога размазывается по шардам"
+      ],
+      "hints": [],
+      "follow_up": "Что делать с диалогом, который стал слишком большим?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "storage",
+        "sharding"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-10",
+      "type": "design",
+      "level": "L5",
+      "question": "Как система будет масштабироваться?",
+      "context": null,
+      "expected_answer": "Message Service и Delivery Service stateless — масштабируются добавлением инстансов. Kafka масштабируется числом partitions, Delivery Service — числом consumers в consumer group (до числа partitions). Gateway масштабируется горизонтально, соединения распределяет балансировщик, а connection registry хранит, где какой пользователь. Хранилище шардируется по conversation_id.",
+      "key_points": [
+        "stateless-сервисы",
+        "partitions и consumers",
+        "горизонтальные gateway",
+        "connection registry",
+        "шардирование хранилища"
+      ],
+      "common_mistakes": [
+        "Масштабировать consumers больше числа partitions"
+      ],
+      "hints": [],
+      "follow_up": "Что станет узким местом первым?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "scaling"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-11",
+      "type": "explain",
+      "level": "L4",
+      "question": "Что произойдёт при падении одного из серверов?",
+      "context": "Разбери по компонентам: gateway, Message Service, Delivery Service, Kafka broker, БД.",
+      "expected_answer": "Gateway: клиенты теряют соединение и переподключаются к другому инстансу, registry обновляется, при подключении досылаются недоставленные. Message Service: stateless — запрос уходит на другой инстанс, клиент повторяет отправку с тем же message_id. Delivery Service: consumer group делает rebalance, partitions переходят к другим consumers, часть сообщений обрабатывается повторно — это безопасно благодаря idempotency. Kafka broker: при replication factor > 1 лидер partition переезжает на реплику. БД: failover на реплику.",
+      "key_points": [
+        "переподключение клиентов",
+        "stateless + retry с тем же message_id",
+        "rebalance consumer group",
+        "повторы безопасны из-за idempotency",
+        "репликация Kafka и БД"
+      ],
+      "common_mistakes": [
+        "Сказать «поднимем новый сервер» без описания, что происходит с данными в полёте"
+      ],
+      "hints": [],
+      "follow_up": "Какие метрики покажут, что упал Delivery Service?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "failure"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-12",
+      "type": "explain",
+      "level": "L6",
+      "question": "Какие узкие места видите?",
+      "context": null,
+      "expected_answer": "Большое число одновременных соединений на gateway; hot chat — очень активный или огромный групповой диалог нагружает одну partition и один шард, потому что ключ — conversation_id; fan-out в больших группах (одно сообщение — много получателей); поток записи в хранилище; connection registry, к которому обращаются на каждую доставку. Решения: горизонтальные gateway, лимиты групп и отдельная обработка больших групп, шардирование, кэширование registry.",
+      "key_points": [
+        "соединения на gateway",
+        "hot chat / hot partition",
+        "fan-out в группах",
+        "запись в хранилище",
+        "connection registry"
+      ],
+      "common_mistakes": [
+        "Назвать узким местом «базу данных» без объяснения, почему"
+      ],
+      "hints": [],
+      "follow_up": "Как разгрузить hot chat, не потеряв порядок?",
+      "priority": "important",
+      "difficulty": 5,
+      "tags": [
+        "bottleneck"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-13",
+      "type": "decision",
+      "level": "L6",
+      "question": "Какой ключ партиционирования Kafka выберешь для сообщений? Какой trade-off?",
+      "context": "Нужен порядок внутри диалога.\n\n- A: без ключа (round-robin) — равномерная нагрузка\n- B: recipient_id\n- C: conversation_id",
+      "expected_answer": "C. Порядок нужен внутри диалога, а Kafka гарантирует его только внутри partition — ключ conversation_id отправляет весь диалог в одну partition. A ломает порядок. B в личке почти работает, но у сообщений одного диалога два получателя, а в группах ключ recipient не определяет диалог. Trade-off C: очень активный диалог нагружает одну partition (hot partition).",
+      "key_points": [
+        "выбор C",
+        "порядок только внутри partition",
+        "A ломает порядок",
+        "trade-off: hot partition"
+      ],
+      "common_mistakes": [
+        "Выбрать A ради равномерности",
+        "Не назвать цену выбора"
+      ],
+      "hints": [],
+      "follow_up": null,
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "decision",
+        "kafka"
+      ]
+    },
+    {
+      "id": "sd-messenger-q-14",
+      "type": "debug",
+      "level": "L4",
+      "question": "Симптом: пользователи иногда видят одно и то же сообщение дважды, чаще после деплоя Delivery Service. Что происходит и как исправить?",
+      "context": "Delivery Service читает Kafka, доставляет сообщение и затем коммитит offset.",
+      "expected_answer": "При деплое consumer останавливается после доставки, но до commit offset; после rebalance новый consumer читает сообщение с последнего закоммиченного offset и доставляет его повторно — это нормальная at-least-once доставка. Исправление: idempotent обработка — проверять message_id (уникальный ключ, таблица обработанных) и клиентская дедупликация по message_id.",
+      "key_points": [
+        "падение между доставкой и commit offset",
+        "rebalance → повторное чтение",
+        "at-least-once — ожидаемо",
+        "дедупликация по message_id"
+      ],
+      "common_mistakes": [
+        "Коммитить offset до доставки — это потеря сообщений вместо дублей"
+      ],
+      "hints": [
+        "Когда коммитится offset относительно side effect?"
+      ],
+      "follow_up": "Что будет, если коммитить offset до доставки?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "troubleshooting",
+        "kafka"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "sd-messenger-we-01",
+      "title": "Мессенджер: полный разбор",
+      "problem": "Спроектируйте систему обмена сообщениями.",
+      "context": "Масштаб не задан интервьюером.",
+      "solution": {
+        "steps": [
+          "Requirements: личные сообщения или группы? История? Online status? Гарантия порядка? Масштаб? Допущения: личные сообщения, история хранится, at-least-once, порядок внутри диалога.",
+          "Approach: асинхронная доставка через брокер, хранилище как источник истины для истории и офлайн-доставки.",
+          "Architecture: Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient; хранение — PostgreSQL / distributed storage.",
+          "Important decisions: партиционирование по conversation_id (порядок в диалоге); idempotent consumer по message_id (повторная доставка); offline — хранение и доставка непрочитанных при подключении; статусы delivered_at / read_at.",
+          "Failure modes: падение gateway → переподключение и досылка; падение consumer → rebalance и повтор, безопасный из-за idempotency; dual write БД + Kafka → transactional outbox.",
+          "Trade-offs: порядок только внутри диалога; hot chat нагружает одну partition; at-least-once требует дедупликации.",
+          "Final solution: stateless Message/Delivery Service, горизонтальные gateway с connection registry, Kafka с ключом conversation_id, хранилище, шардированное по conversation_id, мониторинг consumer lag и времени доставки."
+        ],
+        "code": null
+      },
+      "why_it_works": "Kafka отделяет отправку от доставки и буферизует всплески; ключ conversation_id даёт порядок там, где он нужен; хранилище делает офлайн-получателя обычным случаем; idempotency превращает неизбежные повторы at-least-once в безопасные.",
+      "alternatives": [
+        "Доставка без брокера: Message Service сам пушит в gateway — проще, но нет буфера и повторной обработки",
+        "Exactly-once в Kafka — не решает дубли на стороне внешних side effects (доставка на устройство)"
+      ],
+      "tradeoffs": [
+        "Дубли вместо потерь: at-least-once + idempotency",
+        "Порядок только внутри диалога"
+      ],
+      "common_mistakes": [
+        "Не упомянуть офлайн-получателя",
+        "Обещать глобальный порядок",
+        "Не объяснить, откуда берутся дубли"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "sd-messenger-pr-01",
+      "type": "design",
+      "title": "Групповые чаты",
+      "task": "Расширь дизайн мессенджера на групповые чаты. Что меняется в сущностях, порядке, доставке и узких местах?",
+      "constraints": [
+        "Порядок внутри группы сохраняется",
+        "Доставка at-least-once",
+        "Размер групп не задан — прими допущение"
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Сущности: conversation с участниками (membership), recipient_id уходит из сообщения — статусы delivered/read хранятся по участнику. Порядок: ключ conversation_id как и раньше. Доставка: Delivery Service делает fan-out по участникам группы. Узкие места: большие группы — одно сообщение даёт много доставок; активная группа — hot partition. Решения: лимит размера группы, отдельная обработка больших групп, агрегированные статусы прочтения.",
+        "code": null
+      },
+      "evaluation_points": [
+        "Статусы по участнику",
+        "Порядок через conversation_id",
+        "Fan-out по участникам",
+        "Названы узкие места больших групп"
+      ],
+      "difficulty": 4
+    },
+    {
+      "id": "sd-messenger-pr-02",
+      "type": "debug",
+      "title": "Дубли после retry клиента",
+      "task": "Клиент отправляет сообщение, не получает ответ из-за таймаута и повторяет отправку. У получателя два одинаковых сообщения с разными message_id. Где ошибка в дизайне и как её исправить?",
+      "constraints": [
+        "Нельзя отказаться от retry на клиенте"
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "message_id генерирует сервер при каждом запросе, поэтому retry выглядит как новое сообщение. Исправление: клиент генерирует message_id (UUID) до первой отправки и повторяет запрос с тем же id; сервер делает вставку idempotent по уникальному message_id и возвращает уже созданное сообщение.",
+        "code": null
+      },
+      "evaluation_points": [
+        "Причина — id генерируется на сервере",
+        "Client-generated message_id",
+        "Уникальный ключ и idempotent вставка"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "system-design-approach",
+      "relation": "prerequisite"
+    }
+  ],
+  "story": {
+    "intro": "Строим мессенджер: один человек пишет другому, и сообщение должно дойти — не потеряться, не задвоиться и прийти в правильном порядке.\n\nНачнём с самой простой схемы «клиент → сервер → клиент» и будем чинить её каждый раз, когда она ломается. Требования уже зафиксированы: личные сообщения, история хранится, доставка хотя бы один раз, порядок внутри диалога.",
+    "beats": [
+      {
+        "problem": "Сервер получил сообщение и сразу пересылает его получателю. Но получатель выключил телефон. **Куда деть сообщение?**",
+        "solution": "Сначала сохраняем, потом доставляем. Сообщение записывается в persistent storage, и только после этого отправитель получает подтверждение. Когда получатель подключается, сервер досылает ему непрочитанное. Заодно появилась история переписки.",
+        "term": "persistent storage",
+        "analogy": "Почтовый ящик: письмо ждёт, пока хозяин не вернётся домой."
+      },
+      {
+        "problem": "Получатель онлайн, но в обычном HTTP говорит клиент: он спрашивает — сервер отвечает. **Как сервер сам «дотянется» до телефона получателя?**",
+        "solution": "Клиент держит с сервером долгоживущее двустороннее соединение, и сервер пушит по нему новые сообщения. Все клиенты подключаются через единую точку входа, которая принимает соединения и направляет запросы во внутренние сервисы.",
+        "term": "WebSocket; API Gateway"
+      },
+      {
+        "problem": "Серверов gateway много, и получатель подключён к одному из них. **Через какой сервер отправить ему сообщение?**",
+        "solution": "Заводим реестр «пользователь → инстанс gateway, который держит его соединение». Сервис доставки смотрит в реестр и отправляет сообщение через нужный инстанс. Записи живут с TTL и продлеваются heartbeat'ом, чтобы не указывать на мёртвый сервер.",
+        "term": "connection registry"
+      },
+      {
+        "problem": "Сервис, который принял сообщение, сам ищет получателя и доставляет. Получатель медленный, gateway тормозит — **отправка ждёт доставку, а всплеск сообщений валит сервис.**",
+        "solution": "Разделяем отправку и доставку. Message Service сохраняет сообщение и публикует его в Kafka, отдельный Delivery Service читает Kafka и доставляет. Брокер даёт асинхронность, буферизацию, decoupling сервисов, возможность повторной обработки и масштабирование consumers.",
+        "term": "message broker (Kafka)",
+        "analogy": "Сортировочный центр почты: посылку приняли и выдали квитанцию, а доставкой дальше занимаются другие люди."
+      },
+      {
+        "problem": "Kafka раскладывает сообщения по partitions, а их читают параллельно. Отправитель пишет «Привет», затем «Как дела?». **Почему получатель видит их в обратном порядке?**",
+        "solution": "Kafka гарантирует порядок только внутри одной partition. Поэтому партиционируем по conversation_id: сообщения одного диалога попадают в одну partition и обрабатываются последовательно. Порядок между разными диалогами не нужен.",
+        "term": "Kafka partition, ключ партиционирования",
+        "analogy": "Отдельная очередь к кассе для каждого диалога: внутри очереди никто никого не обгонит."
+      },
+      {
+        "problem": "Delivery Service доставил сообщение и упал, не успев закоммитить offset. После рестарта он читает то же сообщение снова. Или клиент не дождался ответа и повторил отправку. **Получатель видит сообщение дважды.**",
+        "solution": "Это цена доставки «хотя бы один раз»: не теряем, но возможны повторы. Делаем обработку idempotent: у сообщения есть уникальный message_id, а consumer проверяет, не было ли оно уже обработано. message_id генерирует клиент до первой отправки, чтобы retry пришёл с тем же id.",
+        "term": "at-least-once, idempotent consumer, message_id"
+      },
+      {
+        "problem": "Отправитель хочет видеть галочки. **Как узнать, что сообщение доставлено и прочитано?**",
+        "solution": "Храним у сообщения message_id, sender_id, recipient_id, created_at, delivered_at, read_at. Клиент получателя присылает ack — проставляем delivered_at; пользователь открыл чат — read_at. Обновлённый статус уходит отправителю событием.",
+        "term": "delivered / read"
+      },
+      {
+        "problem": "Message Service записал сообщение в БД и упал до публикации в Kafka. **Сообщение в истории есть, а получателю так и не пришло.**",
+        "solution": "Запись в БД и публикация в Kafka — две отдельные операции, между ними можно упасть. Решение: событие пишется в outbox-таблицу в той же транзакции, что и сообщение, а отдельный relay публикует его в Kafka.",
+        "term": "dual write, transactional outbox"
+      },
+      {
+        "problem": "Пользователей и переписок стало много. **Одна база не справляется ни с объёмом, ни с записью.**",
+        "solution": "Шардируем хранилище по conversation_id: вся история диалога лежит на одном шарде и читается без обхода всех серверов. Message Service и Delivery Service stateless — просто добавляем инстансы. Kafka растёт числом partitions, Delivery Service — числом consumers в группе, но не больше, чем partitions.",
+        "term": "шардирование"
+      },
+      {
+        "problem": "**Чем заплатили и где узкие места?**",
+        "solution": "Порядок есть только внутри диалога, не глобально. At-least-once даёт дубли — без idempotency не обойтись.\n\nУзкие места: очень активный или огромный групповой чат нагружает одну partition и один шард (hot chat); в больших группах одно сообщение превращается во множество доставок; огромное число открытых соединений на gateway и обращение к connection registry на каждой доставке.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Предположим личные сообщения, история хранится, сообщения должны доставляться хотя бы один раз, порядок внутри диалога сохраняем. Минимально: Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient, хранение — PostgreSQL / distributed storage.\n\nПолучатель offline: сообщение сохраняем в persistent storage. Когда пользователь подключается, Delivery Service доставляет непрочитанные сообщения. Порядок: партиционируем сообщения по conversation_id, чтобы сообщения одного диалога попадали в одну Kafka partition и обрабатывались последовательно в рамках partition. Повторная доставка: делаем обработку idempotent: у сообщения есть уникальный message_id, а consumer проверяет, не было ли оно уже обработано."
+  },
+  "short_answer": {
+    "junior": "Клиент отправляет сообщение через API Gateway в Message Service. Тот сохраняет его в базу и публикует в Kafka, а Delivery Service читает Kafka и доставляет сообщение получателю. Если получатель офлайн, сообщение ждёт в базе и доставляется, когда он подключится.",
+    "middle": "Требования: нужны личные сообщения или группы? Нужна ли история? Нужен ли online status? Нужна ли гарантия порядка? Какой ожидаемый масштаб? Допущения: предположим личные сообщения, история хранится, сообщения должны доставляться хотя бы один раз, порядок внутри диалога сохраняем.\n\nАрхитектура минимально: Client → API Gateway → Message Service → Kafka → Delivery Service → Recipient. Хранение — PostgreSQL / distributed storage. Kafka даёт асинхронность, буферизацию, decoupling сервисов, возможность повторной обработки и масштабирование consumers.\n\nКлючевые решения:\n- Получатель offline: сообщение сохраняем в persistent storage. Когда пользователь подключается, Delivery Service доставляет непрочитанные сообщения.\n- Порядок: партиционируем сообщения по conversation_id, чтобы сообщения одного диалога попадали в одну Kafka partition и обрабатывались последовательно в рамках partition.\n- Повторная доставка: делаем обработку idempotent: у сообщения есть уникальный message_id, а consumer проверяет, не было ли оно уже обработано.\n- Delivered / read: храним message_id, sender_id, recipient_id, created_at, delivered_at, read_at.\n\nКлиенты держат WebSocket с gateway, connection registry знает, какой инстанс gateway держит соединение получателя. message_id генерирует клиент до отправки, поэтому retry не создаёт дубль. delivered_at проставляется по ack от клиента получателя, read_at — когда он открыл чат.",
+    "senior": "Всё из middle, плюс:\n- Масштабирование: Message Service и Delivery Service stateless — добавляем инстансы. Kafka — числом partitions, Delivery Service — числом consumers в consumer group (не больше числа partitions). Gateway — горизонтально за балансировщиком. Хранилище шардируем по conversation_id, чтобы история диалога читалась с одного шарда.\n- Отказы: упал gateway — клиенты переподключаются к другому инстансу, registry обновляется, досылаем сообщения с delivered_at = NULL. Упал Delivery Service — rebalance consumer group, часть сообщений обработается повторно, и это безопасно благодаря idempotency. Kafka broker и БД — репликация и failover.\n- Dual write: запись в БД и публикация в Kafka — две операции, падение между ними даёт рассинхрон. Решение — transactional outbox.\n- Порядок держится, пока ключ всегда conversation_id и число partitions не меняется: при изменении числа partitions меняется отображение ключа на partition. Дополнительно — sequence number внутри диалога: по нему клиент сортирует сообщения и видит пропуски.\n- Узкие места: hot chat — активный или огромный групповой диалог нагружает одну partition и один шард; fan-out в больших группах; число соединений на gateway; connection registry на каждой доставке.\n- Trade-offs: порядок только внутри диалога, не глобально; at-least-once даёт дубликаты — нужна idempotency.\n- Observability: consumer lag Delivery Service, время доставки, доля недоставленных сообщений.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "Архитектура мессенджера",
+          "mermaid": "flowchart LR\n  C[Client] --> GW[API Gateway]\n  GW --> MS[Message Service]\n  MS -->|сохранить| DB[(\"PostgreSQL /<br/>distributed storage\")]\n  MS -->|\"key = conversation_id\"| K[[Kafka]]\n  K --> DS[Delivery Service]\n  DS -->|\"онлайн: сразу\"| R[Recipient]\n  DB -.->|\"офлайн: при подключении\"| DS",
+          "caption": "Kafka развязывает отправку и доставку, а хранилище держит историю и сообщения для офлайн-получателей."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Путь сообщения: от отправки до «прочитано»",
+          "mermaid": "sequenceDiagram\n  participant A as Отправитель\n  participant GW as API Gateway\n  participant MS as Message Service\n  participant DB as Хранилище\n  participant K as Kafka\n  participant DS as Delivery Service\n  participant B as Получатель\n  A->>GW: сообщение, message_id создан на клиенте\n  GW->>MS: передать сообщение\n  MS->>DB: сохранить, created_at\n  MS->>K: публикация, key = conversation_id\n  MS-->>A: принято сервером\n  K->>DS: сообщение из partition диалога\n  DS->>GW: отправить через инстанс с соединением получателя\n  GW->>B: доставка по WebSocket\n  B-->>DS: ack delivered\n  DS->>DB: delivered_at = now\n  B-->>MS: открыл чат — read\n  MS->>DB: read_at = now",
+          "steps": [
+            "Отправитель пишет сообщение. **message_id** придумывает сам клиент ещё до отправки — чтобы повтор после таймаута не создал дубль.",
+            "Gateway держит соединение с клиентом и передаёт сообщение в Message Service.",
+            "Message Service сначала **сохраняет** сообщение: теперь оно не потеряется, даже если получатель офлайн.",
+            "Потом публикует его в Kafka с ключом **conversation_id**: все сообщения диалога попадут в одну partition и сохранят порядок.",
+            "Отправитель получает подтверждение: сервер сообщение принял.",
+            "Delivery Service читает сообщение из partition этого диалога.",
+            "По connection registry он находит gateway-инстанс, к которому подключён получатель, и отправляет через него.",
+            "Сообщение приходит получателю по WebSocket.",
+            "Приложение получателя отвечает ack: «дошло до устройства».",
+            "По этому ack проставляется **delivered_at**.",
+            "Получатель открывает чат — клиент сообщает, что сообщение прочитано.",
+            "Проставляется **read_at**. Отправитель видит статус «прочитано»."
+          ],
+          "caption": "Сначала сохранить, потом отправить в Kafka по conversation_id, статусы delivered и read — по событиям от получателя."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Офлайн-получатель и повторная доставка",
+          "mermaid": "sequenceDiagram\n  participant MS as Message Service\n  participant DB as Хранилище\n  participant K as Kafka\n  participant DS as Delivery Service\n  participant B as Получатель\n  MS->>DB: сохранить m1, delivered_at пусто\n  MS->>K: m1, key = conversation_id\n  K->>DS: m1\n  Note over DS,B: получатель офлайн — отправить некуда\n  B->>DS: подключился\n  DS->>DB: дай недоставленные\n  DB-->>DS: m1\n  DS->>B: m1\n  B-->>DS: ack delivered\n  DS->>DB: delivered_at = now\n  Note over DS: инстанс упал до коммита offset в Kafka\n  K->>DS: после rebalance m1 приходит ещё раз\n  DS->>DB: m1 уже обработано?\n  DB-->>DS: да — пропустить",
+          "steps": [
+            "Message Service сохраняет сообщение m1. Поле delivered_at пока пустое.",
+            "И публикует m1 в Kafka с ключом conversation_id.",
+            "Delivery Service читает m1 из Kafka.",
+            "Но получатель офлайн: соединения нет, отправлять некуда. Ничего страшного — m1 уже лежит в хранилище.",
+            "Получатель подключается.",
+            "Delivery Service спрашивает у хранилища все сообщения с пустым delivered_at.",
+            "Хранилище отдаёт m1.",
+            "Delivery Service доставляет m1 получателю.",
+            "Клиент получателя присылает ack.",
+            "Проставляется delivered_at — m1 больше не считается недоставленным.",
+            "Инстанс Delivery Service падает, не успев отметить в Kafka, что m1 обработан (commit offset).",
+            "Consumer group перераспределяет partitions (**rebalance**), и другой инстанс получает m1 повторно. Это нормальный **at-least-once**.",
+            "Consumer проверяет по **message_id**, не обрабатывал ли он уже это сообщение.",
+            "Уже обрабатывал — пропускает. Дубля у получателя нет: обработка **idempotent**."
+          ],
+          "caption": "Хранилище спасает от потери при офлайне, а проверка по message_id — от дублей при повторной доставке."
+        }
+      ]
+    }
+  }
+}

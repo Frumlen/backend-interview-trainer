@@ -1,0 +1,61 @@
+{
+  "relations": [
+    {
+      "from": "big-o-complexity",
+      "to": "algo-interview-process",
+      "type": "part_of"
+    },
+    {
+      "from": "algo-edge-cases",
+      "to": "algo-interview-process",
+      "type": "part_of"
+    },
+    {
+      "from": "hash-map",
+      "to": "big-o-complexity",
+      "type": "related"
+    },
+    {
+      "from": "big-o-complexity",
+      "to": "go-slice-append",
+      "type": "related"
+    },
+    {
+      "from": "algo-edge-cases",
+      "to": "go-slice-in-function",
+      "type": "related"
+    },
+    {
+      "from": "hash-map",
+      "to": "race-condition",
+      "type": "related"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-algorithms",
+      "title": "Алгоритмы на интервью",
+      "description": "Процесс решения вслух, оценка сложности, граничные случаи и поиск багов на небольших задачах на Go.",
+      "concept_ids": [
+        "algo-interview-process",
+        "big-o-complexity",
+        "algo-edge-cases",
+        "hash-map"
+      ],
+      "practice_ids": [
+        "algo-interview-process-pr-01",
+        "big-o-complexity-pr-01",
+        "algo-edge-cases-pr-01",
+        "hash-map-pr-01",
+        "hash-map-pr-02"
+      ],
+      "question_ids": [
+        "algo-interview-process-q-03",
+        "big-o-complexity-q-05",
+        "algo-edge-cases-q-03",
+        "algo-edge-cases-q-05",
+        "hash-map-q-04"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,499 @@
+{
+  "id": "go-channel",
+  "title": "Channel",
+  "domain": "Go / Конкурентность",
+  "level": "L3",
+  "tags": [
+    "go",
+    "concurrency",
+    "channel"
+  ],
+  "prerequisites": [
+    "go-goroutine"
+  ],
+  "summary": "Channel используют, когда нужно организовать передачу данных или координацию между goroutine. Он не «лучше mutex», а решает другую задачу: не защищает общее состояние, а передаёт значения или владение ими от одной goroutine к другой с синхронизацией.",
+  "mental_model": {
+    "type": "data_flow",
+    "description": "Труба между goroutine. Unbuffered — встреча отправителя и получателя (рандеву), buffered — очередь фиксированной ёмкости.",
+    "elements": [
+      "producer",
+      "channel",
+      "consumer"
+    ],
+    "relations": [
+      "producer -> channel: ch <- v",
+      "channel -> consumer: v := <-ch"
+    ],
+    "diagram": "unbuffered (cap 0):\nproducer ──ch<-v──┐   ждёт, пока\n                  ├── consumer не примет\nconsumer ──<-ch───┘\n\nbuffered (cap 3):\nproducer → [ v1 | v2 | __ ] → consumer\n  блокируется, только если буфер полон"
+  },
+  "problem": {
+    "question": "Как передать задачи от одной goroutine пулу воркеров и собрать результаты, не разделяя структуры данных под lock?",
+    "context": "Типичный pipeline: чтение → обработка → запись, этапы в разных goroutine.",
+    "why_it_matters": "Передача владения данными через канал убирает разделяемое состояние, а с ним и целый класс гонок."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Send/receive синхронизируют",
+        "description": "Отправка в канал happens-before соответствующего получения, поэтому данные, переданные через канал, видны получателю без дополнительной синхронизации."
+      },
+      {
+        "order": 2,
+        "title": "Unbuffered",
+        "description": "`make(chan T)`: отправитель блокируется, пока получатель не заберёт значение, и наоборот. Это точка встречи двух goroutine."
+      },
+      {
+        "order": 3,
+        "title": "Buffered",
+        "description": "`make(chan T, n)`: отправка блокируется только при полном буфере, получение — при пустом. Буфер сглаживает всплески, но не устраняет разницу скоростей."
+      },
+      {
+        "order": 4,
+        "title": "close",
+        "description": "`close(ch)` сообщает получателям «данных больше не будет». `for v := range ch` завершается после опустошения закрытого канала. Чтение из закрытого канала сразу возвращает zero value и `ok == false`."
+      },
+      {
+        "order": 5,
+        "title": "select",
+        "description": "Ждёт первую готовую из нескольких операций. С `default` — неблокирующая попытка; с `ctx.Done()` или `time.After` — отмена и таймауты."
+      }
+    ],
+    "key_objects": [
+      "chan T",
+      "buffered / unbuffered",
+      "close",
+      "select",
+      "nil channel"
+    ],
+    "important_distinctions": [
+      "Channel — передача данных и координация; mutex — защита общего состояния.",
+      "Закрывает канал отправитель, а не получатель: получатель не знает, будут ли ещё отправки.",
+      "Закрытие канала не обязательно: оно нужно только как сигнал получателям."
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "jobs := make(chan int)\nresults := make(chan int)\n\nvar wg sync.WaitGroup\nfor w := 0; w < 3; w++ {\n    wg.Add(1)\n    go func() {\n        defer wg.Done()\n        for j := range jobs {\n            results <- j * j\n        }\n    }()\n}\ngo func() { wg.Wait(); close(results) }()\n\ngo func() {\n    for i := 1; i <= 5; i++ {\n        jobs <- i\n    }\n    close(jobs) // закрывает отправитель\n}()\n\nsum := 0\nfor r := range results {\n    sum += r\n}\nfmt.Println(sum)",
+    "explanation": "Worker pool: задачи передаются через jobs, результаты — через results. Отправитель закрывает jobs; results закрывается после завершения всех воркеров, поэтому range по results заканчивается.",
+    "expected_result": "55"
+  },
+  "details": [
+    {
+      "title": "Операции над закрытым и nil каналом",
+      "description": "Запись в закрытый канал — panic. Повторный close — panic. Чтение из закрытого — zero value, ok=false, без блокировки. Любая операция с nil-каналом блокирует навсегда (полезно в select, чтобы «выключить» ветку).",
+      "importance": "critical"
+    },
+    {
+      "title": "Кто закрывает",
+      "description": "Закрывает единственный отправитель (или координатор после завершения всех отправителей через WaitGroup). Получатель не закрывает канал.",
+      "importance": "critical"
+    },
+    {
+      "title": "Goroutine leak",
+      "description": "Goroutine, заблокированная на send/receive, которую никто не разблокирует, живёт вечно и держит память. Типично: ранний return получателя, а отправитель застрял на send. Лечится через ctx.Done() в select или буфером нужной ёмкости.",
+      "importance": "important"
+    },
+    {
+      "title": "Буфер — не решение проблемы скорости",
+      "description": "Если consumer стабильно медленнее producer, буфер лишь откладывает блокировку. Нужны backpressure, ограничение или масштабирование consumers.",
+      "importance": "important"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Каждое отправленное в канал значение получает ровно один получатель.",
+      "why": "Канал — очередь, а не broadcast. Для рассылки всем используют close (сигнал) или отдельный канал на каждого подписчика."
+    },
+    {
+      "statement": "len(ch) ≤ cap(ch); у unbuffered cap = 0.",
+      "why": "Буфер фиксированной ёмкости задаётся при создании."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "go-channel-fm-send-no-receiver",
+      "title": "Send в unbuffered канал без получателя",
+      "cause": "`ch := make(chan int); ch <- 1` в main, получателя нет.",
+      "symptom": "`fatal error: all goroutines are asleep - deadlock!` или зависание, если есть другие goroutine.",
+      "mechanism": "Unbuffered send блокируется до появления получателя, а его никогда не будет.",
+      "fix": "Запустить получателя в отдельной goroutine, использовать буфер нужной ёмкости или select с default/таймаутом.",
+      "prevention": null
+    },
+    {
+      "id": "go-channel-fm-double-close",
+      "title": "Двойное закрытие / запись после close",
+      "cause": "Несколько отправителей, каждый вызывает close, или отправитель пишет после close.",
+      "symptom": "`panic: close of closed channel` / `panic: send on closed channel`.",
+      "mechanism": "Runtime запрещает эти операции и паникует.",
+      "fix": "Закрывает один владелец; с несколькими отправителями — WaitGroup + отдельная goroutine, которая закрывает после wg.Wait(), или `sync.Once` вокруг close.",
+      "prevention": "Явно назначать владельца канала."
+    },
+    {
+      "id": "go-channel-fm-leak",
+      "title": "Утечка goroutine на канале",
+      "cause": "Получатель вышел по ошибке или таймауту, а отправитель остался заблокирован на send.",
+      "symptom": "Число goroutine растёт со временем (runtime.NumGoroutine, pprof goroutine), растёт память.",
+      "mechanism": "Заблокированная goroutine не завершается и не собирается GC — её стек и всё, на что она ссылается, остаются живыми.",
+      "fix": "select с `<-ctx.Done()` у отправителя; буфер ёмкостью в число результатов для fire-and-forget.",
+      "prevention": "Каждая goroutine должна иметь понятный путь завершения; тесты с goleak."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Передача данных и координация между goroutine без разделяемого состояния.",
+      "Естественная модель для pipeline, worker pool, сигналов отмены и завершения."
+    ],
+    "costs": [
+      "Дороже mutex на операцию.",
+      "Нужно продумывать владение каналом и закрытие."
+    ],
+    "risks": [
+      "Deadlock, panic на закрытом канале, утечки goroutine."
+    ],
+    "when_tradeoff_matters": "Когда выбираешь между «разделить состояние под mutex» и «передавать владение через канал»."
+  },
+  "usage": {
+    "use_when": [
+      "Нужно организовать передачу данных или координацию между goroutine.",
+      "Pipeline, worker pool, fan-out/fan-in, сигнал done."
+    ],
+    "avoid_when": [
+      "Нужно защитить общее состояние (кэш, счётчики) — для этого mutex или atomic."
+    ],
+    "signals": [
+      "Есть producer и consumer.",
+      "Нужно дождаться события или сигнала от другой goroutine."
+    ],
+    "production_considerations": [
+      "Всегда предусматривать отмену через context в select.",
+      "Мониторить количество goroutine для раннего обнаружения утечек."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "go-mutex",
+      "dimension": "Основная задача",
+      "difference": "Channel — передача данных и координация; mutex — защита общего состояния.",
+      "why_it_matters": "Выбирать инструмент по задаче, а не по «идиоматичности»."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "go-channel-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Для чего используют channel в Go?",
+      "context": null,
+      "expected_answer": "Для передачи данных и координации между goroutine: отправка и получение синхронизируют goroutine, данные передаются от одной к другой. Для защиты общего состояния используют mutex.",
+      "key_points": [
+        "передача данных",
+        "координация goroutine",
+        "не для защиты общего состояния"
+      ],
+      "common_mistakes": [
+        "«Каналы лучше mutex»."
+      ],
+      "hints": [],
+      "follow_up": "Чем buffered отличается от unbuffered?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ]
+    },
+    {
+      "id": "go-channel-q-02",
+      "type": "explain",
+      "level": "L2",
+      "question": "Чем отличается unbuffered channel от buffered? Когда блокируется отправитель в каждом случае?",
+      "context": null,
+      "expected_answer": "Unbuffered (cap 0): send блокируется, пока получатель не примет значение, — синхронная встреча двух goroutine. Buffered (cap n): send блокируется только при полном буфере, receive — при пустом. Буфер развязывает goroutine по времени, но не устраняет разницу скоростей producer и consumer.",
+      "key_points": [
+        "unbuffered — рандеву",
+        "buffered — блокировка при полном буфере",
+        "буфер не решает медленного consumer"
+      ],
+      "common_mistakes": [
+        "Считать, что buffered-канал никогда не блокирует."
+      ],
+      "hints": [],
+      "follow_up": "Как выбрать размер буфера?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "mechanism"
+      ]
+    },
+    {
+      "id": "go-channel-q-03",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что произойдёт при запуске?",
+      "context": null,
+      "code": "package main\n\nimport \"fmt\"\n\nfunc main() {\n    ch := make(chan int)\n    ch <- 1\n    fmt.Println(<-ch)\n}",
+      "code_language": "go",
+      "expected_answer": "`fatal error: all goroutines are asleep - deadlock!`. Канал unbuffered: `ch <- 1` блокирует main до появления получателя, но получение стоит на следующей строке той же goroutine и никогда не выполнится. Других goroutine нет, runtime видит, что все заблокированы. Исправление: `make(chan int, 1)` или отправка в отдельной goroutine.",
+      "key_points": [
+        "unbuffered send блокируется до получателя",
+        "получатель в той же goroutine",
+        "all goroutines are asleep - deadlock!"
+      ],
+      "common_mistakes": [
+        "Ответить «напечатает 1»."
+      ],
+      "hints": [
+        "Когда завершается send в unbuffered канал?"
+      ],
+      "follow_up": "Что изменится с make(chan int, 1)?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "predict",
+        "code"
+      ]
+    },
+    {
+      "id": "go-channel-q-04",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что выведет программа?",
+      "context": null,
+      "code": "package main\n\nimport \"fmt\"\n\nfunc main() {\n    ch := make(chan int, 2)\n    ch <- 1\n    ch <- 2\n    close(ch)\n    for v := range ch {\n        fmt.Print(v, \" \")\n    }\n    v, ok := <-ch\n    fmt.Println(v, ok)\n}",
+      "code_language": "go",
+      "expected_answer": "`1 2 0 false`. После close буферизованные значения всё ещё читаются, range завершается после опустошения закрытого канала. Чтение из закрытого пустого канала возвращает zero value и `ok == false` без блокировки.",
+      "key_points": [
+        "значения из буфера читаются после close",
+        "range завершается",
+        "zero value, ok=false"
+      ],
+      "common_mistakes": [
+        "Думать, что close удаляет буферизованные значения.",
+        "Ожидать panic при чтении из закрытого канала."
+      ],
+      "hints": [],
+      "follow_up": "А что будет при ch <- 3 после close?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "predict",
+        "code"
+      ]
+    },
+    {
+      "id": "go-channel-q-05",
+      "type": "debug",
+      "level": "L4",
+      "question": "Сервис периодически падает с panic. В чём ошибка и как исправить?",
+      "context": null,
+      "code": "func collect(sources []Source) []Item {\n    out := make(chan Item)\n    for _, s := range sources {\n        go func(s Source) {\n            for _, it := range s.Fetch() {\n                out <- it\n            }\n            close(out)\n        }(s)\n    }\n    var items []Item\n    for it := range out {\n        items = append(items, it)\n    }\n    return items\n}",
+      "code_language": "go",
+      "expected_answer": "Каждый отправитель вызывает `close(out)`. Первый закончивший закрывает канал, после чего остальные получают `panic: send on closed channel` или `close of closed channel`. К тому же range по out завершится преждевременно. Исправление: закрывать должен один владелец после завершения всех отправителей — WaitGroup, `wg.Add(1)` на каждого, `defer wg.Done()`, и отдельная goroutine `go func() { wg.Wait(); close(out) }()`.",
+      "key_points": [
+        "несколько отправителей вызывают close",
+        "panic: send on closed channel / close of closed channel",
+        "закрывает один владелец",
+        "WaitGroup + close после Wait"
+      ],
+      "common_mistakes": [
+        "Обернуть close в recover.",
+        "Закрывать канал на стороне получателя."
+      ],
+      "hints": [
+        "Сколько раз вызывается close?"
+      ],
+      "follow_up": "Что будет, если вообще не закрывать out?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "debug",
+        "code"
+      ]
+    },
+    {
+      "id": "go-channel-q-06",
+      "type": "debug",
+      "level": "L4",
+      "question": "Число goroutine в сервисе медленно растёт, память тоже. Найди причину в коде.",
+      "context": null,
+      "code": "func firstResult(ctx context.Context, replicas []string) (string, error) {\n    ch := make(chan string)\n    for _, r := range replicas {\n        go func(r string) {\n            ch <- query(r) // query занимает 10–500 мс\n        }(r)\n    }\n    select {\n    case res := <-ch:\n        return res, nil\n    case <-ctx.Done():\n        return \"\", ctx.Err()\n    }\n}",
+      "code_language": "go",
+      "expected_answer": "Goroutine leak. Читается только первый результат, остальные goroutine навсегда блокируются на `ch <- ...` в unbuffered канале: получателей больше нет. Каждый вызов оставляет len(replicas)−1 зависших goroutine. Исправление: буфер ёмкостью len(replicas) — отправки не блокируются, и goroutine завершатся; либо select с `<-ctx.Done()` при отправке и отмена ctx после получения первого результата.",
+      "key_points": [
+        "goroutine leak",
+        "unbuffered send без получателя",
+        "буфер len(replicas)",
+        "select с ctx.Done() при отправке"
+      ],
+      "common_mistakes": [
+        "Считать, что GC соберёт заблокированные goroutine."
+      ],
+      "hints": [
+        "Кто получит второй и третий результаты?"
+      ],
+      "follow_up": "Как обнаружишь такую утечку в production?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "debug",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "go-channel-q-07",
+      "type": "decision",
+      "level": "L5",
+      "question": "Сервис получает события из Kafka и должен обрабатывать их в 8 параллельных воркерах, сохраняя порядок событий одного пользователя. Как организуешь распределение через каналы?",
+      "context": null,
+      "expected_answer": "8 каналов, по одному на воркер; событие маршрутизируется в канал по `hash(user_id) % 8`. События одного пользователя всегда попадают в один воркер и обрабатываются последовательно, разные пользователи — параллельно. Один общий канал на 8 воркеров порядок не сохраняет. Trade-off: неравномерная нагрузка при «горячих» пользователях и блокировка всей очереди воркера медленным событием.",
+      "key_points": [
+        "канал на воркер",
+        "шардирование по hash(user_id)",
+        "общий канал ломает порядок",
+        "trade-off: горячие ключи"
+      ],
+      "common_mistakes": [
+        "Один общий канал и надежда, что порядок сохранится."
+      ],
+      "hints": [
+        "Та же идея, что partition по ключу в Kafka."
+      ],
+      "follow_up": "Как это соотносится с партиционированием Kafka по ключу?",
+      "priority": "secondary",
+      "difficulty": 4,
+      "tags": [
+        "design"
+      ]
+    }
+  ],
+  "worked_examples": [],
+  "practice": [
+    {
+      "id": "go-channel-pr-01",
+      "type": "code",
+      "title": "Pipeline с отменой",
+      "task": "Реализуй `Squares(ctx context.Context, in <-chan int) <-chan int`: этап pipeline, который возводит числа в квадрат, закрывает выходной канал, когда вход закрыт, и завершается без утечек при отмене ctx.",
+      "constraints": [
+        "Выходной канал закрывается ровно один раз.",
+        "При отмене ctx goroutine завершается, даже если потребитель перестал читать."
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Этап — владелец выходного канала, поэтому закрывает его сам через defer. На каждой отправке select с ctx.Done(), чтобы не зависнуть, если потребитель ушёл.",
+        "code": "func Squares(ctx context.Context, in <-chan int) <-chan int {\n    out := make(chan int)\n    go func() {\n        defer close(out)\n        for v := range in {\n            select {\n            case out <- v * v:\n            case <-ctx.Done():\n                return\n            }\n        }\n    }()\n    return out\n}"
+      },
+      "evaluation_points": [
+        "Этап закрывает только свой выходной канал",
+        "defer close(out)",
+        "select с ctx.Done() на отправке",
+        "range по входному каналу завершается при его закрытии"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "go-goroutine",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "go-mutex",
+      "relation": "alternative"
+    },
+    {
+      "concept_id": "deadlock",
+      "relation": "next"
+    }
+  ],
+  "story": {
+    "intro": "Сервис читает задачи из очереди, раздаёт их трём воркерам и собирает результаты в одном месте. Можно завести общий slice задач под mutex, но есть другой путь: не делить данные, а передавать их из рук в руки.\n\nРазберём, как устроен этот путь и где в нём ловушки.",
+    "beats": [
+      {
+        "problem": "Одна goroutine производит задачи, три другие их обрабатывают. **Как передать задачу воркеру, чтобы никто не читал и не писал одни данные одновременно?**",
+        "solution": "Проложить между goroutine трубу: одна кладёт значение, другая забирает. Значение переходит от одной goroutine к другой, общего состояния нет, и замок не нужен. Отправка синхронизирована с получением: всё, что отправитель записал до отправки, получатель гарантированно увидит.\n```go\njobs := make(chan Job)\ngo func() { jobs <- job }() // отправка\nj := <-jobs                // получение\n```",
+        "term": "channel (канал)",
+        "analogy": "Конвейер между цехами: деталь уходит из одного цеха и приходит в другой, её не держат оба сразу."
+      },
+      {
+        "problem": "Канал создан как `make(chan int)`. В main сделали `ch <- 1`, а прочитать собрались строкой ниже. **Что будет?**",
+        "solution": "Программа упадёт с `fatal error: all goroutines are asleep - deadlock!`. У такого канала нет буфера: отправка ждёт, пока кто-то заберёт значение. А забрать некому — получение стоит на следующей строке той же goroutine.\n\nОтправитель и получатель должны встретиться: один отдаёт, другой в этот же момент принимает.",
+        "term": "unbuffered channel (небуферизованный канал)",
+        "analogy": "Передача из рук в руки: пока второй не протянул руку, первый так и стоит с коробкой."
+      },
+      {
+        "problem": "Producer выдаёт задачи пачками, а воркеры иногда притормаживают. **Как не останавливать producer из-за каждой короткой паузы?**",
+        "solution": "Дать каналу буфер: `make(chan Job, 100)`. Отправка блокируется, только когда буфер полон, получение — когда пуст. Буфер сглаживает всплески.\n\nНо если воркеры стабильно медленнее producer, буфер лишь отложит блокировку: он заполнится, и producer снова встанет. Разницу скоростей решают больше воркеров или ограничение входа, а не размер буфера.",
+        "term": "buffered channel (буферизованный канал); backpressure",
+        "analogy": "Полка между цехами: на неё помещается несколько деталей, но когда полка забита, первый цех всё равно ждёт."
+      },
+      {
+        "problem": "Producer отправил все задачи, воркеры крутятся в `for j := range jobs`. **Как им понять, что больше ничего не будет?**",
+        "solution": "Отправитель закрывает канал: `close(jobs)`. Воркеры дочитают то, что осталось в буфере, и `range` завершится. Чтение из закрытого пустого канала сразу возвращает zero value и `ok == false`.\n\nЗакрывает именно отправитель: получатель не знает, будут ли ещё отправки.",
+        "term": "close"
+      },
+      {
+        "problem": "Отправителей три, и каждый, закончив, вызывает `close(out)`. **Почему сервис периодически падает с panic?**",
+        "solution": "Первый закончивший закрывает канал. Остальные либо пишут в закрытый канал (`send on closed channel`), либо закрывают его повторно (`close of closed channel`) — оба случая panic.\n\nЗакрывать должен один владелец и только после того, как закончили все отправители:\n```go\ngo func() {\n    wg.Wait()\n    close(out)\n}()\n```",
+        "term": null
+      },
+      {
+        "problem": "Воркер ждёт задачу, а запрос тем временем отменили по таймауту. **Как ждать сразу двух событий — задачи и отмены?**",
+        "solution": "Оператор select ждёт первую готовую из нескольких операций с каналами:\n```go\nselect {\ncase j := <-jobs:\n    process(j)\ncase <-ctx.Done():\n    return ctx.Err()\n}\n```\nС веткой `default` select превращается в неблокирующую попытку.",
+        "term": "select"
+      },
+      {
+        "problem": "Запросили три реплики, взяли первый ответ и вышли из функции. Через сутки в сервисе сотни тысяч goroutine. **Откуда они?**",
+        "solution": "Две оставшиеся goroutine пытаются отправить свои ответы в unbuffered канал, но получателя больше нет. Они висят на отправке вечно, и GC их не соберёт: заблокированная goroutine считается живой.\n\nЛечится буфером на число ответов или select с `<-ctx.Done()` на стороне отправителя. Правило: у каждой goroutine должен быть понятный путь завершения.",
+        "term": "goroutine leak (утечка goroutine)",
+        "analogy": "Курьер ждёт у двери с посылкой, а заказчик давно уехал. Только у goroutine смена не кончается никогда."
+      },
+      {
+        "problem": "**Чем заплатили за передачу данных вместо общего состояния?**",
+        "solution": "Операция с каналом дороже захвата mutex. Нужно продумывать владение: кто пишет, кто закрывает, как goroutine завершится при отмене. Ошибки здесь — deadlock, panic на закрытом канале, утечки goroutine.\n\nПоэтому channel берут для передачи данных и координации, а общее состояние вроде кэша или счётчика защищают mutex или atomic.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine.\n\nЭто разные инструменты, а не «channels лучше mutex». Unbuffered channel — встреча отправителя и получателя, buffered — очередь фиксированной ёмкости. Закрывает канал отправитель, а у каждой goroutine должен быть путь завершения, например через `ctx.Done()`."
+  },
+  "short_answer": {
+    "junior": "Channel — труба между goroutine: одна кладёт значение, другая забирает. Так данные передаются без общих переменных и без mutex. Каналы используют, чтобы передавать задачи и результаты и сообщать другим goroutine о событиях, например о завершении.",
+    "middle": "Mutex использую для защиты общего состояния. Channel — когда нужно организовать передачу данных или координацию между goroutine. Это разные инструменты, «channels лучше mutex» — неверно.\n\nКак работает: отправка синхронизирована с получением, поэтому переданные данные видны получателю без дополнительных lock. Unbuffered (`make(chan T)`) — отправитель ждёт получателя. Buffered (`make(chan T, n)`) — отправка блокируется, только когда буфер полон. `close` сообщает «данных больше не будет», и `range` по каналу завершается, дочитав буфер. `select` ждёт первую готовую операцию, в том числе `ctx.Done()`.\n\nКогда применять: передача данных или координация между goroutine; для защиты общего состояния — mutex.\n\nТипичные сценарии: pipeline, worker pool, fan-out/fan-in, сигнал завершения.",
+    "senior": "Всё из middle, плюс:\n- Закрывает единственный владелец — отправитель или координатор после `wg.Wait()`. Запись в закрытый канал и повторный close — panic; чтение из закрытого — zero value и `ok == false`.\n- Любая операция с nil-каналом блокирует навсегда — в select так «выключают» ветку.\n- Goroutine, застрявшая на send или receive, — утечка: GC её не соберёт. На каждой блокирующей операции нужен путь выхода через `ctx.Done()`. Утечки видно по метрике числа goroutine и pprof goroutine, в тестах — goleak.\n- Буфер не лечит медленного consumer, а только откладывает блокировку. Нужны backpressure, ограничение входа или больше consumers.\n- Каждое значение получает ровно один получатель: канал — очередь, а не broadcast. Широковещательный сигнал делают через `close`.\n- Общий канал на несколько воркеров не сохраняет порядок. Если порядок нужен по ключу — канал на воркер и маршрутизация по `hash(key)`.\n- Канал дороже mutex на операцию: для счётчика или кэша он избыточен.",
+    "visuals": {
+      "middle": [
+        {
+          "title": "Unbuffered: отправитель ждёт получателя",
+          "mermaid": "sequenceDiagram\n  participant S as Отправитель\n  participant C as ch без буфера\n  participant R as Получатель\n  S->>C: ch <- v\n  Note over S: блокируется — получателя ещё нет\n  R->>C: <-ch\n  C-->>R: v передано из рук в руки\n  Note over S,R: обе goroutine продолжают работу",
+          "steps": [
+            "Отправитель пишет в канал без буфера: `ch <- v`.",
+            "Хранить значение негде, поэтому отправитель **ждёт**, пока кто-то придёт за ним.",
+            "Получатель выполняет `<-ch`.",
+            "Значение передаётся напрямую. Всё, что отправитель записал до отправки, получателю видно.",
+            "Встреча состоялась — обе goroutine идут дальше."
+          ],
+          "caption": "Unbuffered-канал — точка встречи: отправка завершается только вместе с получением."
+        },
+        {
+          "title": "Buffered: ждать приходится, только когда буфер полон",
+          "mermaid": "sequenceDiagram\n  participant S as Отправитель\n  participant C as ch с буфером 2\n  participant R as Получатель\n  S->>C: v1 — в буфер, без ожидания\n  S->>C: v2 — в буфер, теперь он полон\n  S->>C: v3 — места нет, отправитель ждёт\n  C-->>R: получатель забирает v1\n  Note over S,C: место освободилось, v3 ложится в буфер",
+          "steps": [
+            "Канал `make(chan T, 2)`. Первое значение ложится в буфер — отправитель не ждёт получателя.",
+            "Второе тоже помещается — буфер заполнен.",
+            "Третьему места нет: отправка **блокируется**.",
+            "Получатель забирает v1 — первое пришедшее значение, канал работает как очередь.",
+            "Место освободилось, v3 уходит в буфер, отправитель продолжает."
+          ],
+          "caption": "Буфер сглаживает всплески, но если получатель медленнее, отправитель всё равно упрётся в полный буфер."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Fan-in: кто закрывает каналы",
+          "mermaid": "flowchart LR\n  P[\"Producer:<br/>отправляет задачи,<br/>потом close(jobs)\"] --> J([\"jobs\"])\n  J --> W1[\"worker 1\"]\n  J --> W2[\"worker 2\"]\n  W1 --> R([\"results\"])\n  W2 --> R\n  W1 -.->|\"Done()\"| WG[\"Координатор:<br/>wg.Wait(), потом close(results)\"]\n  W2 -.->|\"Done()\"| WG\n  WG -.->|close| R\n  R --> C[\"Consumer:<br/>for r := range results\"]",
+          "caption": "У каждого канала один владелец: `jobs` закрывает producer, `results` — координатор, когда все воркеры точно закончили отправку."
+        }
+      ]
+    }
+  }
+}

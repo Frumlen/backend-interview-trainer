@@ -1,0 +1,650 @@
+{
+  "id": "go-goroutine",
+  "title": "Goroutine vs OS thread",
+  "domain": "Go / Планировщик",
+  "level": "L2",
+  "tags": [
+    "go",
+    "concurrency",
+    "runtime",
+    "scheduler"
+  ],
+  "prerequisites": [],
+  "summary": "Goroutine — единица конкурентного выполнения в Go, которой управляет runtime, а не ОС. Goroutine значительно легче OS thread: создаётся дешевле и имеет небольшой начальный stack, который может динамически расти. Выполняет goroutine поток ОС (M), который она получает через планировщик: G выполняется на M.",
+  "mental_model": {
+    "type": "table",
+    "description": "Много лёгких goroutine мультиплексируются на небольшое число OS threads. Главные различия — кто управляет, сколько стоит стек, создание и переключение.",
+    "elements": [
+      "goroutine (G)",
+      "OS thread (M)",
+      "runtime scheduler",
+      "stack"
+    ],
+    "relations": [
+      "goroutine (G) -> OS thread (M): выполняется на",
+      "runtime scheduler -> goroutine (G): распределяет"
+    ],
+    "diagram": null,
+    "table": {
+      "columns": [
+        "",
+        "Goroutine",
+        "OS thread"
+      ],
+      "rows": [
+        [
+          "Кто управляет",
+          "runtime Go (планировщик)",
+          "ядро ОС"
+        ],
+        [
+          "Стек",
+          "небольшой, растёт динамически; старт ~2 KB",
+          "фиксированный, обычно порядка мегабайт"
+        ],
+        [
+          "Создание",
+          "дешёвое",
+          "системный вызов, заметно дороже"
+        ],
+        [
+          "Переключение",
+          "в user space, без системного вызова",
+          "context switch через ядро"
+        ],
+        [
+          "Сколько держать",
+          "сотни тысяч и больше",
+          "обычно тысячи"
+        ]
+      ]
+    }
+  },
+  "problem": {
+    "question": "Как обслуживать десятки тысяч одновременных задач (запросы, соединения, фоновые операции), если OS thread — тяжёлый ресурс?",
+    "context": "Поток на каждую задачу упирается в память на стеки и стоимость создания и переключения потоков. Callback-стиль экономит потоки, но усложняет код.",
+    "why_it_matters": "Goroutine позволяют писать простой последовательный код и при этом держать очень много конкурентных задач: дорогие OS threads остаются в небольшом количестве, а лёгкие goroutine распределяются по ним планировщиком."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Создание: `go f()`",
+        "description": "Runtime создаёт G — свою структуру с небольшим начальным stack. ОС о ней ничего не знает, поэтому создание дешёвое."
+      },
+      {
+        "order": 2,
+        "title": "Выполнение на OS thread",
+        "description": "G выполняется на M (OS thread); M получает работу через P. Много G по очереди выполняются на небольшом числе M."
+      },
+      {
+        "order": 3,
+        "title": "Рост стека",
+        "description": "Стек небольшой и растёт динамически. Когда места не хватает, runtime выделяет стек вдвое больше и копирует в него содержимое, поправляя указатели на стек."
+      },
+      {
+        "order": 4,
+        "title": "Блокировка без блокировки потока",
+        "description": "Когда G ждёт channel, mutex или сетевой I/O, runtime паркует её и запускает на том же M другую G. Это переключение в user space, без context switch ядра."
+      },
+      {
+        "order": 5,
+        "title": "Завершение",
+        "description": "G завершается, когда её функция возвращает управление. Остановить goroutine снаружи нельзя — только попросить завершиться: `context`, закрытие channel. Когда возвращается `main`, программа завершается вместе со всеми goroutine."
+      }
+    ],
+    "key_objects": [
+      "goroutine (G)",
+      "OS thread (M)",
+      "stack goroutine",
+      "runtime scheduler"
+    ],
+    "important_distinctions": [
+      "Goroutine — не OS thread: много G мультиплексируются на небольшое число M",
+      "Лёгкость goroutine — это маленький растущий стек и дешёвое создание, а не бесплатность: у каждой goroutine есть память и цена",
+      "Goroutine нельзя «убить» снаружи — завершение только кооперативное (context, закрытие channel)",
+      "Заблокированную навсегда goroutine GC не соберёт: это утечка, а не мусор"
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "// фрагмент тела main; импорт fmt и sync\nvar wg sync.WaitGroup\nfor i := 0; i < 100_000; i++ {\n\twg.Add(1)\n\tgo func(n int) {\n\t\tdefer wg.Done()\n\t\t_ = n * n\n\t}(i)\n}\nwg.Wait()\nfmt.Println(\"done\")",
+    "explanation": "100 000 goroutine — нормальная нагрузка для runtime: каждая стартует с маленьким стеком, и все они выполняются на нескольких OS threads. 100 000 OS threads упёрлись бы в память на стеки и лимиты ОС. `WaitGroup` нужен, чтобы `main` не завершился раньше goroutine.",
+    "expected_result": "done"
+  },
+  "details": [
+    {
+      "title": "G выполняется на M, M получает работу через P",
+      "description": "Goroutine сама по себе не выполняется: её код исполняет OS thread (M), которому планировщик выдаёт G через P. Поэтому «goroutine vs thread» — это не альтернатива, а два уровня: лёгкая задача и поток, который её выполняет.",
+      "importance": "critical"
+    },
+    {
+      "title": "Одновременно Go-код выполняют не больше GOMAXPROCS потоков",
+      "description": "Можно держать сотни тысяч goroutine, но параллельно выполняются только столько, сколько P (`GOMAXPROCS`, по умолчанию — число CPU). Остальные ждут в очередях или заблокированы.",
+      "importance": "important"
+    },
+    {
+      "title": "Стартовый стек и его рост",
+      "description": "Начальный стек goroutine — порядка 2 KB. При нехватке он растёт копированием в больший. С Go 1.19 runtime может выбирать стартовый размер по средней наблюдаемой глубине стеков. Точные числа — деталь реализации.",
+      "importance": "important"
+    },
+    {
+      "title": "main не ждёт goroutine",
+      "description": "Когда `main` возвращается, процесс завершается, и незаконченные goroutine просто прерываются. Ожидание — явное: `sync.WaitGroup`, channel, `errgroup`.",
+      "importance": "important"
+    },
+    {
+      "title": "panic в goroutine роняет весь процесс",
+      "description": "Непойманный panic в любой goroutine завершает программу. `recover` работает только внутри той же goroutine, в которой случился panic, поэтому фоновые goroutine в серверах часто оборачивают в recover с логированием.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Goroutine выполняется только на OS thread (M)",
+      "why": "По модели G/M/P код goroutine исполняет поток, получивший её через P; сама G — лишь структура runtime."
+    },
+    {
+      "statement": "Возврат из main завершает программу независимо от работающих goroutine",
+      "why": "Runtime не ждёт фоновые goroutine; синхронизация — ответственность программы."
+    },
+    {
+      "statement": "Заблокированная навсегда goroutine и всё, на что она ссылается, остаются в памяти",
+      "why": "Припаркованная G достижима для runtime, поэтому GC не может освободить её стек и захваченные объекты."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "go-goroutine-fm-leak",
+      "title": "Утечка goroutine",
+      "cause": "Goroutine ждёт channel, в который никто не отправит, или отправляет в channel, из которого никто не прочитает (например, после timeout в select).",
+      "symptom": "Число goroutine (`runtime.NumGoroutine`, метрика `go_goroutines`) и память растут со временем и не возвращаются к базовой линии.",
+      "mechanism": "Заблокированная G навсегда припаркована; её стек и захваченные переменные достижимы для runtime, GC их не освобождает. Каждый запрос добавляет ещё одну такую goroutine.",
+      "fix": "Дать goroutine способ завершиться: buffered channel на один результат, `context` с отменой, закрытие channel отправителем.",
+      "prevention": "Goroutine-профиль pprof в тестах и на стенде, проверка утечек в тестах (например, библиотекой goleak), алерт на рост `go_goroutines`."
+    },
+    {
+      "id": "go-goroutine-fm-unbounded",
+      "title": "Неограниченное создание goroutine",
+      "cause": "На каждый входящий элемент или запрос запускается новая goroutine без лимита конкурентности.",
+      "symptom": "Всплеск памяти и latency при пике нагрузки, давление на GC, внешняя система захлёбывается от параллельных вызовов.",
+      "mechanism": "Goroutine дешёвые, но не бесплатные: N goroutine — это N стеков, N объектов для GC и N одновременных обращений к зависимостям.",
+      "fix": "Ограничить конкурентность: worker pool, семафор через buffered channel, `errgroup.SetLimit`.",
+      "prevention": "Явный лимит конкурентности в каждом месте, где goroutine создаются по входным данным."
+    },
+    {
+      "id": "go-goroutine-fm-main-exit",
+      "title": "main завершился раньше goroutine",
+      "cause": "Нет ожидания фоновых goroutine перед выходом из `main`.",
+      "symptom": "Часть работы не выполнена, вывод goroutine не появляется, результат недетерминирован.",
+      "mechanism": "Возврат из `main` завершает процесс; runtime не ждёт остальные goroutine.",
+      "fix": "`sync.WaitGroup`, channel с результатами или `errgroup.Wait()`.",
+      "prevention": null
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Дешёвая конкурентность: небольшой растущий стек и дешёвое создание",
+      "Простой последовательный код вместо callback'ов: блокирующий вызов не занимает OS thread",
+      "Масштаб на сотни тысяч одновременных задач"
+    ],
+    "costs": [
+      "Разделяемые данные требуют синхронизации (mutex, channel)",
+      "Нет контроля над тем, на каком OS thread выполняется goroutine (важно для cgo и thread-local API — `runtime.LockOSThread`)"
+    ],
+    "risks": [
+      "Утечки goroutine при забытых channel и отсутствии отмены",
+      "Неограниченный рост числа goroutine под нагрузкой"
+    ],
+    "when_tradeoff_matters": "Высококонкурентные I/O-сервисы: каждая goroutine дешёвая, но без лимитов и отмены их количество становится проблемой."
+  },
+  "usage": {
+    "use_when": [
+      "Много одновременных I/O-задач: запросы, соединения, вызовы внешних сервисов",
+      "Параллельная обработка независимых вычислений",
+      "Фоновые задачи с отменой через context"
+    ],
+    "avoid_when": [
+      "Goroutine на каждый мелкий элемент без лимита — лучше фиксированный worker pool",
+      "Нужно выполнение на конкретном OS thread — только с `runtime.LockOSThread`"
+    ],
+    "signals": [
+      "Задачи в основном ждут I/O и независимы друг от друга",
+      "Нужно одновременно обслуживать много клиентов"
+    ],
+    "production_considerations": [
+      "Метрика числа goroutine и алерт на её рост",
+      "Лимит конкурентности и context с таймаутом у каждой фоновой goroutine",
+      "recover с логированием в долгоживущих фоновых goroutine"
+    ]
+  },
+  "comparison": [],
+  "claims": [
+    {
+      "id": "go-goroutine-claim-01",
+      "statement": "Goroutine имеет небольшой начальный stack, который может динамически расти.",
+      "status": "confirmed",
+      "notes": "Конкретный стартовый размер (~2 KB) и стратегия (с Go 1.19 — по средней глубине стеков) — детали реализации runtime и зависят от версии Go."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "go-goroutine-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Чем горутина отличается от OS thread?",
+      "context": null,
+      "expected_answer": "Goroutine значительно легче OS thread: создаётся дешевле и имеет небольшой начальный stack, который может динамически расти. Ей управляет runtime Go, а не ОС, и много goroutine выполняются на небольшом числе OS threads: G выполняется на M, M получает работу через P.",
+      "key_points": [
+        "легче и дешевле в создании",
+        "небольшой stack, растёт динамически",
+        "управляет runtime, а не ОС",
+        "много G на небольшое число M"
+      ],
+      "common_mistakes": [
+        "Говорить, что goroutine — это поток ОС",
+        "Считать goroutine бесплатными: у каждой есть стек и цена для GC"
+      ],
+      "hints": [
+        "Сравни по трём осям: кто управляет, стек, стоимость."
+      ],
+      "follow_up": "Почему переключение между goroutine дешевле, чем между потоками?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "goroutine",
+        "recall"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-02",
+      "type": "explain",
+      "level": "L2",
+      "question": "Объясни, за счёт чего goroutine дешевле OS thread. Какие механизмы это обеспечивают?",
+      "context": null,
+      "expected_answer": "Три механизма:\n- маленький стартовый стек (порядка 2 KB), который растёт копированием только при необходимости; у потока стек фиксированный и порядка мегабайт;\n- создание — это выделение структуры runtime, без системного вызова;\n- переключение между goroutine выполняет планировщик Go в user space: когда G блокируется на channel, mutex или сетевом I/O, runtime паркует её и запускает другую G на том же потоке, без context switch ядра.",
+      "key_points": [
+        "маленький растущий стек",
+        "создание без системного вызова",
+        "переключение в user space",
+        "блокировка паркует G, а не поток"
+      ],
+      "common_mistakes": [
+        "Объяснять только размером стека",
+        "Думать, что блокировка goroutine блокирует OS thread всегда"
+      ],
+      "hints": [
+        "Что происходит с потоком, когда goroutine ждёт channel?"
+      ],
+      "follow_up": "А что происходит с потоком, если goroutine делает блокирующий системный вызов?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "goroutine",
+        "mechanism"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-03",
+      "type": "multiple_choice",
+      "level": "L1",
+      "question": "Что происходит с работающими goroutine, когда функция main возвращается?",
+      "context": null,
+      "expected_answer": "Программа завершается, незаконченные goroutine прерываются. Runtime их не ждёт — ожидание делают явно через `sync.WaitGroup`, channel или `errgroup`.",
+      "key_points": [
+        "процесс завершается",
+        "runtime не ждёт goroutine",
+        "ожидание — явное"
+      ],
+      "common_mistakes": [
+        "Считать, что runtime дожидается фоновых goroutine"
+      ],
+      "hints": [],
+      "follow_up": "Как дождаться завершения группы goroutine и собрать первую ошибку?",
+      "priority": "important",
+      "difficulty": 1,
+      "tags": [
+        "goroutine"
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Программа ждёт, пока все goroutine закончат работу",
+          "correct": false,
+          "explanation": "Runtime не ждёт фоновые goroutine — это частая ошибка."
+        },
+        {
+          "id": "b",
+          "text": "Goroutine продолжают работать, пока процесс не получит сигнал",
+          "correct": false,
+          "explanation": "Процесс завершается сразу после возврата из main."
+        },
+        {
+          "id": "c",
+          "text": "Процесс завершается, незаконченные goroutine прерываются",
+          "correct": true,
+          "explanation": "Поэтому нужна явная синхронизация: WaitGroup, channel, errgroup."
+        },
+        {
+          "id": "d",
+          "text": "Runtime вызывает panic, если остались живые goroutine",
+          "correct": false,
+          "explanation": "Никакого panic нет — goroutine просто прерываются."
+        }
+      ]
+    },
+    {
+      "id": "go-goroutine-q-04",
+      "type": "predict",
+      "level": "L3",
+      "question": "Что гарантированно выведет этот код? Почему?",
+      "context": "Фрагмент тела `main`, импорт `fmt`.",
+      "code": "go fmt.Println(\"hello from goroutine\")\nfmt.Println(\"hello from main\")",
+      "code_language": "go",
+      "expected_answer": "Гарантированно — только `hello from main`. Строка из goroutine может не успеть напечататься: после второго `Println` функция `main` возвращается, процесс завершается и прерывает goroutine. Порядок и сам факт вывода goroutine не гарантированы.",
+      "key_points": [
+        "гарантирован только вывод main",
+        "main не ждёт goroutine",
+        "порядок не гарантирован"
+      ],
+      "common_mistakes": [
+        "Ожидать обе строки, причём сначала строку из goroutine",
+        "Исправлять через time.Sleep вместо синхронизации"
+      ],
+      "hints": [
+        "Кто ждёт завершения goroutine?"
+      ],
+      "follow_up": "Как исправить, чтобы обе строки печатались всегда?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "goroutine",
+        "predict"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-05",
+      "type": "explain",
+      "level": "L3",
+      "question": "Что происходит при большом количестве горутин?",
+      "context": "Вопрос о том, где проходит граница между «goroutine дешёвые» и «goroutine стали проблемой».",
+      "expected_answer": "Goroutine лёгкие: небольшой растущий стек и дешёвое создание, поэтому сотни тысяч goroutine сами по себе нормальны. Цена растёт вместе с количеством:\n- память: N стеков плюс всё, на что ссылаются goroutine;\n- GC: стеки goroutine — корни, их нужно сканировать, отсюда больше работы GC;\n- параллельно выполняются только GOMAXPROCS goroutine, остальные ждут в очередях — при CPU-bound работе растёт latency, а не throughput;\n- зависимости: тысячи одновременных вызовов БД или внешнего API перегружают их.\n\nГлавный риск — не количество, а неограниченный рост и утечки. Решение — лимит конкурентности (worker pool, семафор, `errgroup.SetLimit`) и отмена через context.",
+      "key_points": [
+        "goroutine лёгкие — сотни тысяч допустимы",
+        "память на стеки",
+        "работа GC по стекам",
+        "параллельно выполняются только GOMAXPROCS",
+        "лимит конкурентности и отмена"
+      ],
+      "common_mistakes": [
+        "«Goroutine бесплатные, можно сколько угодно»",
+        "«Каждая goroutine — отдельный поток ОС»"
+      ],
+      "hints": [
+        "Что растёт линейно с числом goroutine?"
+      ],
+      "follow_up": "Как ограничить число одновременно работающих goroutine?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "goroutine",
+        "scaling"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-06",
+      "type": "debug",
+      "level": "L4",
+      "question": "После релиза память сервиса и число goroutine растут весь день и не падают. Найди проблему в обработчике и исправь.",
+      "context": "`callBackend` иногда отвечает дольше секунды.",
+      "code": "func handle(w http.ResponseWriter, r *http.Request) {\n\tch := make(chan result)\n\tgo func() {\n\t\tch <- callBackend(r.Context())\n\t}()\n\tselect {\n\tcase res := <-ch:\n\t\twriteJSON(w, res)\n\tcase <-time.After(time.Second):\n\t\thttp.Error(w, \"timeout\", http.StatusGatewayTimeout)\n\t}\n}",
+      "code_language": "go",
+      "expected_answer": "Утечка goroutine. При timeout обработчик выходит из `select`, и из `ch` больше никто не читает. Channel небуферизованный, поэтому goroutine навсегда блокируется на `ch <- ...` вместе со своим стеком и результатом. Каждый медленный запрос оставляет одну такую goroutine.\n\nИсправление:\n- `ch := make(chan result, 1)` — отправка одного результата не блокирует, goroutine завершится;\n- лучше ещё передать в `callBackend` context с таймаутом (`context.WithTimeout(r.Context(), time.Second)`), чтобы сам вызов прекращался, а не работал впустую.",
+      "key_points": [
+        "при timeout никто не читает ch",
+        "unbuffered send блокируется навсегда",
+        "goroutine leak",
+        "buffered channel на 1",
+        "context с таймаутом"
+      ],
+      "common_mistakes": [
+        "Искать проблему в time.After",
+        "Считать, что GC соберёт заблокированную goroutine"
+      ],
+      "hints": [
+        "Что делает goroutine, когда обработчик уже вернул timeout?"
+      ],
+      "follow_up": "Как увидеть такие goroutine в работающем сервисе?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "goroutine",
+        "leak",
+        "debug"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-07",
+      "type": "design",
+      "level": "L5",
+      "question": "Нужно обработать большую очередь задач: каждая — HTTP-вызов к внешнему сервису, у которого есть лимит на число одновременных запросов. Как организуешь goroutine?",
+      "context": "Размер очереди заранее неизвестен. Обработку нужно уметь остановить.",
+      "expected_answer": "Не goroutine на каждую задачу, а ограниченная конкурентность:\n- worker pool: N goroutine читают задачи из channel; N подбирается под лимит внешнего сервиса;\n- альтернатива — `errgroup` с `SetLimit(N)` или семафор через buffered channel;\n- у каждого вызова context с таймаутом, общий context для остановки всей обработки;\n- результаты и ошибки — через channel или errgroup; при необходимости retry с backoff только для безопасных повторов.\n\nТак память и нагрузка на внешний сервис ограничены сверху, а остановка управляется одним context.",
+      "key_points": [
+        "лимит конкурентности N",
+        "worker pool / errgroup.SetLimit / семафор",
+        "context для таймаутов и остановки",
+        "сбор ошибок"
+      ],
+      "common_mistakes": [
+        "Запустить goroutine на каждую задачу",
+        "Ограничить конкурентность через time.Sleep"
+      ],
+      "hints": [
+        "Что должно ограничивать число одновременных вызовов?"
+      ],
+      "follow_up": "Как корректно завершить воркеры, когда задачи закончились?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "goroutine",
+        "design"
+      ]
+    },
+    {
+      "id": "go-goroutine-q-08",
+      "type": "decision",
+      "level": "L6",
+      "question": "Goroutine на каждый элемент или фиксированный worker pool — как выбрать?",
+      "context": "Варианты:\nA) `go process(item)` для каждого элемента;\nB) пул из N воркеров, читающих из channel;\nC) `errgroup` с `SetLimit(N)`.",
+      "expected_answer": "A подходит, когда элементов немного и их число ограничено сверху — это самый простой код. B и C — когда поток данных большой или неограниченный, работа упирается в CPU (N ≈ GOMAXPROCS) или во внешний ресурс с лимитом (N по лимиту). C удобнее B, когда нужна первая ошибка и отмена остальных задач.\n\nTrade-off: простота и максимальный параллелизм (A) против предсказуемой памяти и нагрузки на зависимости (B/C).",
+      "key_points": [
+        "A — при малом ограниченном числе",
+        "B/C — при большом потоке или внешнем лимите",
+        "N по CPU или по лимиту ресурса",
+        "errgroup — ошибки и отмена"
+      ],
+      "common_mistakes": [
+        "Выбирать A для входных данных неограниченного размера",
+        "Ставить N = 1000 без связи с ресурсом"
+      ],
+      "hints": [],
+      "follow_up": "Как подобрать N для CPU-bound и для I/O-bound задач?",
+      "priority": "secondary",
+      "difficulty": 4,
+      "tags": [
+        "goroutine",
+        "tradeoff"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "go-goroutine-we-01",
+      "title": "Утечка goroutine при timeout: до и после",
+      "problem": "Обработчик запускает goroutine для вызова backend и ждёт результат с timeout. Под нагрузкой число goroutine растёт без остановки.",
+      "context": "Код обработчика — из вопроса go-goroutine-q-06.",
+      "solution": {
+        "steps": [
+          "Симптом: метрика `go_goroutines` растёт, память растёт, после деплоя сбрасывается и снова растёт.",
+          "Диагностика: goroutine-профиль (`/debug/pprof/goroutine?debug=1`) показывает тысячи goroutine с одинаковым стеком, заблокированных на `chan send` в `handle.func1`.",
+          "Причина: после timeout из channel никто не читает, небуферизованная отправка блокирует goroutine навсегда.",
+          "Минимальный fix: `make(chan result, 1)` — отправка единственного результата больше не блокирует.",
+          "Полноценный fix: `ctx, cancel := context.WithTimeout(r.Context(), time.Second)`, `defer cancel()`, передать `ctx` в `callBackend`, чтобы вызов прекращался по timeout.",
+          "Проверка: после деплоя `go_goroutines` держится на уровне, пропорциональном текущей нагрузке."
+        ],
+        "code": "ctx, cancel := context.WithTimeout(r.Context(), time.Second)\ndefer cancel()\nch := make(chan result, 1)\ngo func() {\n\tch <- callBackend(ctx)\n}()\nselect {\ncase res := <-ch:\n\twriteJSON(w, res)\ncase <-ctx.Done():\n\thttp.Error(w, \"timeout\", http.StatusGatewayTimeout)\n}"
+      },
+      "why_it_works": "Buffered channel на один элемент гарантирует, что единственная отправка не заблокируется даже без получателя. Context останавливает сам вызов, поэтому goroutine быстро завершается и не тратит ресурсы впустую.",
+      "alternatives": [
+        "Вызывать `callBackend(ctx)` синхронно с context-таймаутом — отдельная goroutine не нужна, если вызов уважает context"
+      ],
+      "tradeoffs": [
+        "Buffered channel убирает утечку, но без context вызов всё равно доработает до конца и займёт соединение"
+      ],
+      "common_mistakes": [
+        "Лечить утечку увеличением памяти или рестартами по расписанию",
+        "Добавить buffered channel большого размера «на всякий случай»"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "go-goroutine-pr-01",
+      "type": "code",
+      "title": "Ограничить конкурентность",
+      "task": "Есть `urls []string` и функция `fetch(ctx context.Context, url string) error`. Напиши функцию `fetchAll(ctx, urls)`, которая выполняет не больше 10 запросов одновременно, дожидается всех и возвращает первую ошибку.",
+      "constraints": [
+        "не больше 10 одновременных вызовов fetch",
+        "дождаться завершения всех goroutine",
+        "вернуть первую ошибку"
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Семафор через buffered channel на 10 слотов плюс WaitGroup; первая ошибка — через `sync.Once` или buffered channel. Короче — `errgroup` с `SetLimit(10)`: он ограничивает конкурентность, ждёт всех и возвращает первую ошибку, а его context отменяется при первой ошибке.",
+        "code": "func fetchAll(ctx context.Context, urls []string) error {\n\tg, ctx := errgroup.WithContext(ctx)\n\tg.SetLimit(10)\n\tfor _, u := range urls {\n\t\tu := u // не нужно с Go 1.22, безопасно всегда\n\t\tg.Go(func() error {\n\t\t\treturn fetch(ctx, u)\n\t\t})\n\t}\n\treturn g.Wait()\n}"
+      },
+      "evaluation_points": [
+        "конкурентность ограничена (семафор, пул или SetLimit)",
+        "ожидание всех goroutine перед возвратом",
+        "возврат первой ошибки",
+        "context передаётся в fetch"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "go-scheduler-gmp",
+      "relation": "next"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "related"
+    },
+    {
+      "concept_id": "race-condition",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-stack-vs-heap",
+      "relation": "related"
+    },
+    {
+      "concept_id": "concurrency-vs-parallelism",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Сервер принимает соединения. Каждый клиент то шлёт запрос, то ждёт ответа базы, то молчит. Обработку хочется писать просто и последовательно: прочитал → сходил в БД → ответил.\n\nПосмотрим, во что это упирается и как Go из этого выходит.",
+    "beats": [
+      {
+        "problem": "Самый прямой вариант — по OS thread на соединение. Клиентов стало 10 000 — память кончилась, а ядро тратит всё больше времени на переключения между потоками. **Что делать?**",
+        "solution": "OS thread — тяжёлый ресурс: ядро резервирует ему стек фиксированного размера (обычно мегабайты виртуальной памяти), а создание и переключение потоков идут через ядро. Десятки тысяч потоков — это много памяти и много переключений. Нужна единица работы легче потока.",
+        "term": "OS thread"
+      },
+      {
+        "problem": "Можно писать на callback'ах: один поток обслуживает много соединений, а код разбит на «когда придут данные — вызови вот это». **Но простой код превращается в лапшу — как сохранить последовательный стиль?**",
+        "solution": "Сделать лёгкие задачи, которыми управляет не ОС, а сам runtime языка. Каждая задача пишется как обычный последовательный код, а runtime сажает её выполняться на один из немногих потоков. `go handle(conn)` — и задача создана.",
+        "term": "goroutine",
+        "analogy": "Ресторан: столиков (goroutine) в зале много, официантов (OS threads) — несколько. Официант не стоит у одного столика весь вечер, а переходит туда, где он сейчас нужен."
+      },
+      {
+        "problem": "Goroutine хочется создавать сотнями тысяч. **Сколько памяти дать каждой под stack?** Много — не хватит памяти, мало — упадёт глубокий вызов.",
+        "solution": "Начинать с маленького stack — порядка нескольких килобайт — и растить по необходимости. Когда места не хватает, runtime выделяет stack побольше и копирует туда содержимое. Поэтому goroutine стартует дёшево, а глубокая рекурсия всё равно работает.",
+        "term": "растущий stack goroutine"
+      },
+      {
+        "problem": "Goroutine пошла в базу и ждёт ответа. **Поток, на котором она выполнялась, тоже будет стоять и ждать?**",
+        "solution": "Обычно нет. Когда goroutine ждёт channel, mutex или сетевой I/O, runtime откладывает её и запускает на том же потоке другую goroutine. Переключение идёт внутри процесса, без обращения к ядру, поэтому оно дешевле переключения потоков. Когда ответ придёт, goroutine вернётся в очередь на выполнение.",
+        "term": "парковка goroutine, переключение в user space",
+        "analogy": "Официант принял заказ и не стоит над столиком, пока готовит кухня: он идёт к следующему, а к этому вернётся, когда блюдо будет готово."
+      },
+      {
+        "problem": "**Кто решает, какая goroutine на каком потоке выполняется?**",
+        "solution": "Планировщик runtime. Упрощённо: G (goroutine) выполняется на M (OS thread), а M получает работу через P — ресурс runtime. Одновременно Go-код выполняют не больше `GOMAXPROCS` потоков, по умолчанию — по числу CPU. Подробности — в разделе про планировщик.",
+        "term": "G / M / P"
+      },
+      {
+        "problem": "Клиент ушёл, goroutine больше не нужна. **Как остановить её снаружи?**",
+        "solution": "Никак: убить goroutine извне нельзя. Её можно только попросить завершиться — отменить `context` или закрыть channel, — а сама goroutine должна это заметить и вернуться.\n\nИ наоборот: когда возвращается `main`, программа завершается сразу, не дожидаясь остальных goroutine."
+      },
+      {
+        "problem": "Goroutine ждёт результат из channel, в который после таймаута уже никто не отправит. **Что с ней будет?**",
+        "solution": "Она будет ждать вечно. GC её не соберёт: заблокированная goroutine жива, и всё, на что она ссылается, достижимо. Число goroutine и память растут весь день.\n\nЛечится тем, что каждой goroutine дают способ завершиться: context с таймаутом, buffered channel на один результат.",
+        "term": "goroutine leak (утечка goroutine)"
+      },
+      {
+        "problem": "**Чем заплатили за дешёвые goroutine?**",
+        "solution": "Дешёвые — не значит бесплатные: у каждой есть stack и данные, а стеки сканирует GC. Без лимита конкурентности число goroutine растёт вместе с нагрузкой, а тысячи одновременных запросов перегружают базу.\n\nОбщие данные между goroutine требуют синхронизации. И нет контроля над тем, на каком потоке выполняется goroutine: для thread-local API нужен `runtime.LockOSThread`."
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Goroutine значительно легче OS thread, создаётся дешевле и имеет небольшой начальный stack, который может динамически расти.\n\nЕй управляет runtime Go, а не ОС: много goroutine выполняются на небольшом числе OS threads — G выполняется на M, M получает работу через P. Блокировка goroutine на channel, mutex или сетевом I/O обычно не блокирует поток."
+  },
+  "short_answer": {
+    "junior": "Goroutine — лёгкая задача, которой управляет runtime Go, а не операционная система. Она создаётся намного дешевле потока и начинает с маленького стека, поэтому их можно запускать сотнями тысяч. Много goroutine по очереди выполняются на нескольких потоках ОС.",
+    "middle": "Goroutine значительно легче OS thread, создаётся дешевле и имеет небольшой начальный stack, который может динамически расти. Ей управляет runtime Go, а не ОС: G выполняется на M (OS thread), M получает работу через P.\n\nКак работает: `go f()` создаёт структуру runtime с маленьким stack — ядро о ней не знает. Когда goroutine ждёт channel, mutex или сетевой I/O, runtime паркует её и запускает на том же потоке другую — переключение в user space, без context switch ядра. Одновременно выполняются не больше `GOMAXPROCS` goroutine.\n\nКогда важно: много одновременных I/O-задач — соединения, запросы, вызовы внешних сервисов. Код остаётся последовательным, а потоков нужно немного.",
+    "senior": "Всё из middle, плюс:\n- Дёшево ≠ бесплатно: память на стеки и на всё, на что ссылаются goroutine; стеки — корни для GC, их нужно сканировать. Сотни тысяч goroutine — нормально, опасен неограниченный рост.\n- Goroutine leak: заблокированную навсегда goroutine GC не соберёт. Типичные причины — отправка в channel, из которого после timeout никто не читает, ожидание без отмены. Диагностика — метрика `go_goroutines` и goroutine-профиль pprof; fix — context, buffered channel на один результат.\n- Остановить goroutine снаружи нельзя — только кооперативно (context, закрытие channel). `main` не ждёт goroutine: нужны `sync.WaitGroup` или `errgroup`.\n- Непойманный panic в любой goroutine роняет весь процесс, а `recover` работает только в той же goroutine. Поэтому фоновые goroutine в серверах оборачивают в recover с логированием.\n- Лимит конкурентности: worker pool, семафор на buffered channel, `errgroup.SetLimit`. Для CPU-bound работы воркеров ≈ GOMAXPROCS, для I/O-bound — по лимиту внешнего ресурса.\n- Блокирующий syscall или cgo-вызов занимает OS thread целиком; для thread-local API нужен `runtime.LockOSThread`.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "Много goroutine на нескольких потоках",
+          "mermaid": "flowchart LR\n  subgraph GS[\"goroutine: сотни тысяч, управляет runtime\"]\n    G1[\"G1\"]\n    G2[\"G2\"]\n    G3[\"G3\"]\n    G4[\"G4\"]\n    GN[\"... Gn\"]\n  end\n  SCH[\"планировщик<br/>runtime Go\"]\n  subgraph TS[\"потоки ОС: несколько, управляет ядро\"]\n    T1[\"thread 1\"]\n    T2[\"thread 2\"]\n  end\n  G1 & G2 & G3 & G4 & GN --> SCH\n  SCH -- \"сажает на поток\" --> T1 & T2",
+          "caption": "Runtime сам раскладывает много лёгких goroutine на немногие потоки ОС — это модель M:N."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Goroutine ждёт — поток не простаивает",
+          "mermaid": "sequenceDiagram\n  participant G1 as goroutine G1\n  participant R as runtime\n  participant M as OS thread M\n  participant G2 as goroutine G2\n  M->>G1: выполняет G1\n  G1->>R: жду ответ из сети\n  Note over G1,R: G1 припаркована, поток свободен\n  R->>M: следующая в очереди — G2\n  M->>G2: выполняет G2\n  R->>G1: ответ пришёл, G1 снова готова\n  Note over G1,G2: G1 продолжит на первом свободном потоке",
+          "steps": [
+            "Поток M выполняет goroutine G1: обработчик запроса пошёл в базу.",
+            "G1 отправила запрос и ждёт ответа. Данных пока нет.",
+            "Runtime **паркует** G1: запоминает её состояние и снимает с потока. Поток M при этом не блокируется.",
+            "Планировщик даёт M следующую готовую goroutine.",
+            "M выполняет G2. Переключение прошло в user space, без context switch ядра.",
+            "Ответ от базы пришёл: runtime возвращает G1 в очередь готовых goroutine.",
+            "Когда найдётся свободный поток, G1 продолжит с того же места. Для кода это обычное последовательное чтение."
+          ],
+          "caption": "Ожидание на сети, channel или mutex снимает с потока только goroutine, а переключение идёт внутри процесса, без ядра."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Goroutine leak: отправка, которую никто не примет",
+          "mermaid": "sequenceDiagram\n  participant H as Обработчик\n  participant W as goroutine worker\n  participant C as unbuffered channel\n  H->>W: go worker(ch)\n  H->>C: select: жду результат или timeout\n  Note over H: timeout сработал\n  H-->>H: return, из ch больше никто не читает\n  W->>C: отправка результата в ch\n  Note over W,C: получателя нет, worker заблокирована навсегда\n  Note over H,C: fix: make(chan T, 1) или ctx.Done() в select",
+          "steps": [
+            "Обработчик запускает worker в отдельной goroutine и передаёт ей небуферизованный channel.",
+            "Обработчик ждёт в `select`: результат из channel или таймаут.",
+            "Внешний вызов тормозит — срабатывает таймаут.",
+            "Обработчик возвращает ошибку клиенту и завершается. Читателя у channel больше нет.",
+            "Worker наконец получила результат и пытается отправить его в channel.",
+            "Отправка в небуферизованный channel ждёт получателя, а его не будет. Goroutine висит вечно, GC её не соберёт. Видно по росту `go_goroutines` и в goroutine-профиле.",
+            "Исправление: buffered channel на один результат — отправка пройдёт без получателя; или передать `context` и в worker выбирать в `select` между отправкой и `ctx.Done()`."
+          ],
+          "caption": "Заблокированная навсегда goroutine жива для GC, поэтому держит память вместе со всем, на что ссылается."
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "schema_version": "1.1",
+  "course": {
+    "id": "backend-interview-trainer",
+    "title": "Backend-собеседование: сеть, БД, алгоритмы, Go, system design",
+    "description": "Подготовка к техническому собеседованию backend-разработчика: сеть, базы данных, алгоритмы, Go и system design. Каждая тема объясняется цепочкой «проблема → решение», есть краткий ответ на трёх уровнях, вопросы на вспоминание, практика и интервальное повторение. Работает офлайн, прогресс хранится в браузере.",
+    "levels": [
+      {
+        "id": "L1",
+        "title": "Recall",
+        "description": "Что это?"
+      },
+      {
+        "id": "L2",
+        "title": "Understanding",
+        "description": "Почему и как это работает?"
+      },
+      {
+        "id": "L3",
+        "title": "Application",
+        "description": "Как применить?"
+      },
+      {
+        "id": "L4",
+        "title": "Troubleshooting",
+        "description": "Почему это сломалось?"
+      },
+      {
+        "id": "L5",
+        "title": "Design",
+        "description": "Как спроектировать решение?"
+      },
+      {
+        "id": "L6",
+        "title": "Expert / Trade-offs",
+        "description": "Какой вариант выбрать и почему?"
+      }
+    ]
+  },
+  "exam_sets": [
+    {
+      "id": "exam-network",
+      "title": "Сеть: HTTP, TCP/UDP",
+      "description": "Вопросы по HTTP и TCP / UDP плюс диагностика и выбор протокола.",
+      "question_ids": [
+        "http-methods-q-01",
+        "udp-q-02",
+        "http-status-codes-q-01",
+        "tcp-q-04",
+        "http2-q-03",
+        "udp-q-04",
+        "http-q-05",
+        "tcp-q-06",
+        "http-q-06",
+        "http-status-codes-q-05",
+        "http2-q-08",
+        "http3-quic-q-07"
+      ]
+    },
+    {
+      "id": "exam-databases",
+      "title": "Базы данных: индексы, медленный запрос, JOIN",
+      "description": "Индексы, EXPLAIN, диагностика медленного запроса и JOIN.",
+      "question_ids": [
+        "postgresql-composite-index-q-01",
+        "sql-join-q-01",
+        "postgresql-slow-query-q-01",
+        "postgresql-index-not-used-q-02",
+        "sql-join-q-03",
+        "postgresql-slow-query-q-03",
+        "postgresql-index-q-02",
+        "postgresql-explain-q-07",
+        "postgresql-index-q-05",
+        "postgresql-index-not-used-q-05",
+        "postgresql-index-types-q-06",
+        "postgresql-index-types-q-07"
+      ]
+    },
+    {
+      "id": "exam-algorithms",
+      "title": "Алгоритмы: процесс решения и проверка",
+      "description": "Как рассуждать над задачей, сложность, граничные случаи, поиск ошибки.",
+      "question_ids": [
+        "algo-edge-cases-q-01",
+        "algo-interview-process-q-05",
+        "big-o-complexity-q-04",
+        "algo-edge-cases-q-02",
+        "big-o-complexity-q-02",
+        "algo-interview-process-q-03",
+        "hash-map-q-04",
+        "hash-map-q-05"
+      ]
+    },
+    {
+      "id": "exam-go",
+      "title": "Go: GC, планировщик, slice, конкурентность",
+      "description": "Разделы «Go» и «Если кандидат не знает Go».",
+      "question_ids": [
+        "profiling-q-01",
+        "go-array-q-01",
+        "concurrency-vs-parallelism-q-01",
+        "go-gc-q-04",
+        "go-goroutine-q-05",
+        "profiling-q-03",
+        "go-slice-in-function-q-02",
+        "race-condition-q-03",
+        "go-gc-q-06",
+        "go-scheduler-gmp-q-05",
+        "cpython-gc-q-06",
+        "go-subslice-q-01",
+        "go-sync-primitives-q-02",
+        "go-scheduler-gmp-q-08",
+        "go-slice-q-09",
+        "deadlock-q-06"
+      ]
+    },
+    {
+      "id": "exam-system-design",
+      "title": "System Design: Messenger, Web Search, Instagram",
+      "description": "Требования, архитектура, порядок и доставка, индекс, лента и fan-out, отказы.",
+      "question_ids": [
+        "sd-web-search-q-04",
+        "sd-instagram-q-03",
+        "sd-web-search-q-05",
+        "sd-instagram-q-05",
+        "sd-messenger-q-06",
+        "sd-messenger-q-11",
+        "system-design-approach-q-07",
+        "feed-fan-out-q-06",
+        "feed-fan-out-q-04",
+        "system-design-approach-q-06"
+      ]
+    },
+    {
+      "id": "exam-screening-mix",
+      "title": "Смешанный скрининг",
+      "description": "Прогон как на реальном интервью: все технические разделы вперемешку.",
+      "question_ids": [
+        "profiling-q-01",
+        "tcp-q-02",
+        "algo-interview-process-q-01",
+        "go-goroutine-q-01",
+        "go-subslice-q-01",
+        "http2-q-02",
+        "sql-join-q-04",
+        "sd-messenger-q-04",
+        "go-mutex-q-02",
+        "postgresql-slow-query-q-04",
+        "go-stack-vs-heap-q-04",
+        "udp-q-02",
+        "big-o-complexity-q-02",
+        "go-slice-in-function-q-02",
+        "http-methods-q-07",
+        "sd-instagram-q-06",
+        "go-channel-q-07",
+        "postgresql-explain-q-08",
+        "algo-edge-cases-q-02",
+        "sd-web-search-q-09"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+course.json
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+.idea/
+.vscode/

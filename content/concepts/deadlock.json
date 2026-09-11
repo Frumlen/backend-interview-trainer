@@ -1,0 +1,613 @@
+{
+  "id": "deadlock",
+  "title": "Deadlock",
+  "domain": "Go / Конкурентность",
+  "level": "L4",
+  "tags": [
+    "go",
+    "concurrency",
+    "deadlock",
+    "mutex",
+    "channel"
+  ],
+  "prerequisites": [
+    "go-mutex"
+  ],
+  "summary": "Deadlock — ситуация, когда goroutine не могут продолжить выполнение, потому что ждут ресурсы друг друга. Классика: G1 держит A и ждёт B, G2 держит B и ждёт A — никто не отпустит своё первым.",
+  "mental_model": {
+    "type": "diagram",
+    "description": "Deadlock — это цикл в графе ожидания: каждая goroutine держит ресурс, нужный следующей, и ждёт ресурс предыдущей.",
+    "elements": [
+      "G1",
+      "G2",
+      "mutex A",
+      "mutex B"
+    ],
+    "relations": [
+      "G1 -> G2: ждёт B",
+      "G2 -> G1: ждёт A"
+    ],
+    "diagram": "G1: Lock(A) ✓ ──► Lock(B) … ждёт G2\nG2: Lock(B) ✓ ──► Lock(A) … ждёт G1\n\nГраф ожидания (цикл = deadlock):\n\n   G1 ──ждёт B──► G2\n    ▲              │\n    └───ждёт A─────┘",
+    "table": null
+  },
+  "problem": {
+    "question": "Что будет, если две goroutine захватывают одни и те же блокировки в разном порядке?",
+    "context": "Операция перевода блокирует счёт-отправитель, затем счёт-получатель. Одновременно идут встречные переводы A→B и B→A.",
+    "why_it_matters": "Зависшие goroutine не падают и не потребляют CPU: процесс выглядит живым, а часть запросов не завершается никогда."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Взаимное ожидание",
+        "description": "G1 захватила A и ждёт B; G2 захватила B и ждёт A. Каждая ждёт, пока другая отпустит ресурс, а отпустить может только после того, как получит свой второй ресурс. Ни одна не продвигается."
+      },
+      {
+        "order": 2,
+        "title": "Четыре условия возникновения",
+        "description": "Deadlock возможен, только если выполнены все четыре условия (Coffman): взаимное исключение, удержание ресурса во время ожидания другого, нельзя отобрать ресурс принудительно, циклическое ожидание. Убери любое — deadlock невозможен. На практике ломают циклическое ожидание (единый порядок захвата) или удержание с ожиданием (таймауты, захват всего сразу)."
+      },
+      {
+        "order": 3,
+        "title": "Что обнаруживает runtime",
+        "description": "Go-runtime сообщает `fatal error: all goroutines are asleep - deadlock!`, только если заблокированы **все** goroutine. В сервисе почти всегда есть живые goroutine (ожидание сети, таймеры), поэтому частичный deadlock runtime не видит: процесс работает, а зависшие goroutine висят молча."
+      },
+      {
+        "order": 4,
+        "title": "Как найти зависшие goroutine",
+        "description": "Снять goroutine dump: `/debug/pprof/goroutine?debug=2` (если подключён `net/http/pprof`) или сигнал `SIGQUIT` (`kill -QUIT <pid>`), который печатает стеки всех goroutine. В дампе видно, кто и сколько минут ждёт в `sync.Mutex.Lock`, `chan send`, `chan receive` или `sync.WaitGroup.Wait` — по стекам восстанавливается цикл."
+      },
+      {
+        "order": 5,
+        "title": "Типичные источники в Go",
+        "description": "- разный порядок захвата двух mutex;\n- взаимное ожидание по каналам: обе goroutine отправляют в unbuffered канал, и никто не читает;\n- `wg.Wait()`, когда `Done()` вызывается не на всех путях;\n- повторный `Lock` того же mutex и забытый `Unlock` (см. концепт Mutex)."
+      }
+    ],
+    "key_objects": [
+      "goroutine",
+      "sync.Mutex",
+      "channel",
+      "sync.WaitGroup",
+      "граф ожидания",
+      "goroutine dump"
+    ],
+    "important_distinctions": [
+      "Deadlock — goroutine стоят и не тратят CPU; livelock — goroutine активно работают (например, бесконечно ретраят), но не продвигаются.",
+      "Race condition даёт неверный результат при работающей программе; deadlock — остановку. Инструменты разные: `-race` для гонок, goroutine dump для зависаний.",
+      "Частичный deadlock в сервисе снаружи выглядит как goroutine leak: растёт число goroutine, запросы висят до таймаута клиента."
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "package main\n\nimport (\n    \"sync\"\n    \"time\"\n)\n\nfunc main() {\n    var a, b sync.Mutex\n    var wg sync.WaitGroup\n    wg.Add(2)\n\n    go func() { // G1: A → B\n        defer wg.Done()\n        a.Lock()\n        defer a.Unlock()\n        time.Sleep(10 * time.Millisecond)\n        b.Lock()\n        defer b.Unlock()\n    }()\n\n    go func() { // G2: B → A\n        defer wg.Done()\n        b.Lock()\n        defer b.Unlock()\n        time.Sleep(10 * time.Millisecond)\n        a.Lock()\n        defer a.Unlock()\n    }()\n\n    wg.Wait()\n}",
+    "explanation": "Схема G1/G2 в коде. `Sleep` гарантирует, что обе goroutine успеют взять свой первый mutex. Дальше G1 ждёт B, G2 ждёт A, а main ждёт в `wg.Wait()`. Заблокированы все goroutine, поэтому runtime завершает программу.",
+    "expected_result": "fatal error: all goroutines are asleep - deadlock!"
+  },
+  "details": [
+    {
+      "title": "Классическая схема",
+      "description": "G1 держит A → ждёт B; G2 держит B → ждёт A. Это минимальный цикл ожидания; в реальности цикл может проходить через три и более goroutine и смешивать mutex и каналы.",
+      "importance": "critical"
+    },
+    {
+      "title": "Runtime ловит только полный deadlock",
+      "description": "`all goroutines are asleep` — только когда не осталось ни одной goroutine, способной продолжить. В сервере с HTTP-листенером или таймерами зависание части goroutine проходит молча. Отсутствие fatal error не значит, что deadlock'а нет.",
+      "importance": "critical"
+    },
+    {
+      "title": "`-race` и `go vet` deadlock не ищут",
+      "description": "Race detector находит конкурентный доступ к памяти без синхронизации. Зависание он не обнаружит: код с deadlock может быть полностью «правильно синхронизирован». Для зависаний нужны goroutine dump, таймауты и метрика числа goroutine.",
+      "importance": "important"
+    },
+    {
+      "title": "WaitGroup: недостающий Done",
+      "description": "Если `Done()` вызывается не на всех путях (ранний `return`, panic до `Done`), счётчик не дойдёт до нуля и `Wait()` заблокируется навсегда. Идиома: `defer wg.Done()` первой строкой goroutine, `wg.Add` — до `go`.",
+      "importance": "important"
+    },
+    {
+      "title": "Deadlock через каналы",
+      "description": "Каналы не защищают от deadlock: две goroutine, которые сначала отправляют друг другу в unbuffered каналы и только потом читают, заблокируются навсегда. Отправка в unbuffered канал ждёт получателя.",
+      "importance": "important"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Для deadlock нужен цикл ожидания: G1 ждёт ресурс, который держит G2, а G2 — ресурс, который держит G1.",
+      "why": "Без цикла ожидание конечно: владелец ресурса рано или поздно доделает работу и отпустит его."
+    },
+    {
+      "statement": "Если все goroutine захватывают блокировки в одном глобальном порядке, циклическое ожидание невозможно.",
+      "why": "Цикл потребовал бы, чтобы кто-то взял «меньший» ресурс после «большего», а это нарушает порядок."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "deadlock-fm-lock-order",
+      "title": "Разный порядок захвата двух mutex",
+      "cause": "Функция `Transfer(from, to)` лочит сначала `from`, потом `to`; встречные переводы A→B и B→A идут одновременно.",
+      "symptom": "Под нагрузкой редко и невоспроизводимо зависает часть запросов; в goroutine dump пары goroutine много минут ждут в `sync.Mutex.Lock` внутри `Transfer`.",
+      "mechanism": "Каждая goroutine держит первый mutex и ждёт второй, который держит встречная — цикл ожидания.",
+      "fix": "Захватывать блокировки в едином порядке (например, по возрастанию ID счёта); отдельно обработать `from == to`.",
+      "prevention": "Правило порядка захвата в коде и на ревью; по возможности не держать больше одного lock одновременно."
+    },
+    {
+      "id": "deadlock-fm-partial",
+      "title": "Частичный deadlock в сервисе",
+      "cause": "Несколько goroutine навсегда застряли в цикле ожидания, остальные продолжают работать.",
+      "symptom": "Процесс жив, CPU низкий, часть запросов висит до таймаута клиента, метрика числа goroutine растёт; `fatal error` нет.",
+      "mechanism": "Детектор runtime срабатывает только при блокировке всех goroutine; HTTP-сервер и таймеры держат остальных живыми.",
+      "fix": "Снять goroutine dump, найти goroutine с долгим ожиданием в `Lock`/`chan send`/`chan receive`, восстановить цикл и устранить его (порядок захвата, перестройка протокола каналов).",
+      "prevention": "Метрика `go_goroutines` с алертом на рост, `net/http/pprof` на внутреннем порту, `context`-таймауты на операциях ожидания."
+    },
+    {
+      "id": "deadlock-fm-waitgroup",
+      "title": "wg.Wait() без парного Done",
+      "cause": "Ранний `return` или panic в goroutine до вызова `wg.Done()`.",
+      "symptom": "Код навсегда останавливается на `wg.Wait()`; в маленькой программе — `fatal error: all goroutines are asleep - deadlock!`.",
+      "mechanism": "Счётчик WaitGroup не опускается до нуля, `Wait` ждёт бесконечно.",
+      "fix": "`defer wg.Done()` первой строкой goroutine.",
+      "prevention": "Идиома Add → go → defer Done; `errgroup` вместо ручного WaitGroup там, где нужны ошибки."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Единый порядок захвата устраняет цикл без накладных расходов во время выполнения.",
+      "Таймауты и `context` превращают вечное зависание в ошибку, которую видно в логах и метриках."
+    ],
+    "costs": [
+      "Порядок захвата — неявное правило: его легко нарушить при рефакторинге.",
+      "Один крупный lock вместо нескольких исключает deadlock, но снижает параллелизм (contention)."
+    ],
+    "risks": [
+      "Таймаут с повторной попыткой маскирует причину: retry может снова попасть в тот же цикл."
+    ],
+    "when_tradeoff_matters": "Когда операция держит больше одного lock одновременно или goroutine ждут друг друга через каналы."
+  },
+  "usage": {
+    "use_when": [],
+    "avoid_when": [],
+    "signals": [
+      "Процесс жив, CPU низкий, часть запросов висит.",
+      "Число goroutine растёт и не возвращается к норме.",
+      "`fatal error: all goroutines are asleep - deadlock!` в тестах или утилитах."
+    ],
+    "production_considerations": [
+      "Метрика числа goroutine и алерт на её рост.",
+      "`net/http/pprof` на внутреннем порту, чтобы снять goroutine dump без перезапуска.",
+      "Таймауты на всех ожиданиях, которые зависят от других goroutine или сервисов."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "race-condition",
+      "dimension": "Как проявляется",
+      "difference": "Race condition — программа работает, но результат неверный или недетерминированный. Deadlock — goroutine стоят и не продвигаются.",
+      "why_it_matters": "По симптому сразу понятно, куда смотреть: неверные данные → гонка, зависание → deadlock."
+    },
+    {
+      "concept_id": "race-condition",
+      "dimension": "Чем обнаружить",
+      "difference": "Гонку находит `go test -race`; deadlock — fatal error runtime (только полный) или goroutine dump.",
+      "why_it_matters": "`-race` на зависающем коде ничего не покажет — нужен другой инструмент."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "deadlock-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое deadlock? Приведи классическую схему.",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Deadlock — ситуация, когда goroutine не могут продолжить выполнение, потому что ждут ресурсы друг друга. Классика: G1 держит A и ждёт B, G2 держит B и ждёт A.",
+      "key_points": [
+        "goroutine ждут ресурсы друг друга",
+        "никто не может продолжить",
+        "G1 держит A → ждёт B",
+        "G2 держит B → ждёт A"
+      ],
+      "common_mistakes": [
+        "Путать deadlock с медленной работой: при deadlock ожидание бесконечное",
+        "Путать deadlock с race condition"
+      ],
+      "hints": [
+        "Нарисуй две goroutine и два mutex."
+      ],
+      "follow_up": "Как Go-runtime реагирует на такую ситуацию?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "definition"
+      ]
+    },
+    {
+      "id": "deadlock-q-02",
+      "type": "explain",
+      "level": "L2",
+      "question": "Какие условия нужны для возникновения deadlock и какое из них проще всего сломать на практике?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Нужны все четыре условия: взаимное исключение (ресурс держит один), удержание с ожиданием (держу A и жду B), нельзя отобрать ресурс принудительно, циклическое ожидание. Проще всего сломать циклическое ожидание: захватывать блокировки в едином глобальном порядке. Второй вариант — убрать удержание с ожиданием: таймаут на ожидании или захват всего нужного сразу под одним lock.",
+      "key_points": [
+        "взаимное исключение",
+        "удержание с ожиданием",
+        "нет принудительного отбора",
+        "циклическое ожидание",
+        "ломаем цикл единым порядком захвата"
+      ],
+      "common_mistakes": [
+        "Считать, что достаточно «добавить ещё один mutex»",
+        "Предлагать `time.Sleep` как решение"
+      ],
+      "hints": [
+        "Какое условие видно на схеме G1/G2 как стрелка по кругу?"
+      ],
+      "follow_up": "Как обеспечить единый порядок, если блокировки берутся в разных пакетах?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "mechanism"
+      ]
+    },
+    {
+      "id": "deadlock-q-03",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что выведет программа?",
+      "context": null,
+      "code": "func main() {\n    var wg sync.WaitGroup\n    for i := 0; i < 3; i++ {\n        wg.Add(1)\n        go func(n int) {\n            if n == 1 {\n                return\n            }\n            defer wg.Done()\n            fmt.Println(\"done\", n)\n        }(i)\n    }\n    wg.Wait()\n    fmt.Println(\"all\")\n}",
+      "code_language": "go",
+      "expected_answer": "`done 0` и `done 2` в любом порядке, затем `fatal error: all goroutines are asleep - deadlock!`. `all` не напечатается. Goroutine с `n == 1` выходит до `defer wg.Done()`, счётчик остаётся равен 1, и main навсегда ждёт в `wg.Wait()`. Других goroutine нет, поэтому runtime фиксирует полный deadlock. Исправление — `defer wg.Done()` первой строкой goroutine.",
+      "key_points": [
+        "ранний return до Done",
+        "счётчик WaitGroup не обнуляется",
+        "Wait блокируется навсегда",
+        "fatal error: all goroutines are asleep",
+        "defer wg.Done() первой строкой"
+      ],
+      "common_mistakes": [
+        "Думать, что программа напечатает all",
+        "Думать, что return внутри goroutine автоматически вызовет Done"
+      ],
+      "hints": [
+        "Сколько раз будет вызван Done?"
+      ],
+      "follow_up": "Что изменится, если в программе параллельно работает HTTP-сервер?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "predict",
+        "code",
+        "waitgroup"
+      ]
+    },
+    {
+      "id": "deadlock-q-04",
+      "type": "predict",
+      "level": "L3",
+      "question": "Что произойдёт при запуске? Как исправить, не меняя каналы на buffered?",
+      "context": null,
+      "code": "func main() {\n    ping := make(chan int)\n    pong := make(chan int)\n\n    go func() {\n        ping <- 1\n        <-pong\n    }()\n\n    pong <- 2\n    <-ping\n    fmt.Println(\"ok\")\n}",
+      "code_language": "go",
+      "expected_answer": "`fatal error: all goroutines are asleep - deadlock!`. Отправка в unbuffered канал ждёт получателя. Goroutine блокируется на `ping <- 1` (никто не читает ping), main — на `pong <- 2` (никто не читает pong). Обе отправляют, никто не читает — цикл ожидания. Исправление: согласовать порядок протокола — main сначала `<-ping`, потом `pong <- 2`.",
+      "key_points": [
+        "unbuffered send ждёт получателя",
+        "обе стороны отправляют первыми",
+        "цикл ожидания через каналы",
+        "исправление — порядок операций в протоколе"
+      ],
+      "common_mistakes": [
+        "Считать, что каналы защищают от deadlock",
+        "Лечить только buffered каналом, не понимая, почему он помогает"
+      ],
+      "hints": [
+        "Кто первым читает хоть один из каналов?"
+      ],
+      "follow_up": "Почему buffered канал размером 1 здесь тоже помог бы?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "predict",
+        "code",
+        "channel"
+      ]
+    },
+    {
+      "id": "deadlock-q-05",
+      "type": "debug",
+      "level": "L4",
+      "question": "Что здесь не так и как исправить?",
+      "context": "Сервис переводов работает часами, но под нагрузкой иногда часть запросов зависает навсегда. Процесс жив, CPU низкий, `fatal error` нет.",
+      "code": "type Account struct {\n    ID      int\n    mu      sync.Mutex\n    balance int\n}\n\nfunc Transfer(from, to *Account, amount int) {\n    from.mu.Lock()\n    defer from.mu.Unlock()\n    to.mu.Lock()\n    defer to.mu.Unlock()\n    from.balance -= amount\n    to.balance += amount\n}",
+      "code_language": "go",
+      "expected_answer": "Встречные переводы A→B и B→A захватывают mutex в разном порядке: первая goroutine держит A и ждёт B, вторая держит B и ждёт A — deadlock. Runtime его не видит, потому что остальные goroutine сервиса живы. Ещё баг: при `from == to` goroutine дважды лочит один mutex и зависает сама на себе. Исправление: выйти при `from == to` и захватывать в едином порядке по ID:\n```go\nfirst, second := from, to\nif to.ID < from.ID {\n    first, second = to, from\n}\nfirst.mu.Lock()\ndefer first.mu.Unlock()\nsecond.mu.Lock()\ndefer second.mu.Unlock()\n```",
+      "key_points": [
+        "встречные переводы — разный порядок захвата",
+        "цикл ожидания",
+        "runtime не видит частичный deadlock",
+        "единый порядок по ID",
+        "случай from == to"
+      ],
+      "common_mistakes": [
+        "Искать гонку через `-race` — гонки здесь нет",
+        "Забыть про перевод самому себе"
+      ],
+      "hints": [
+        "Что будет, если одновременно вызвать Transfer(a, b) и Transfer(b, a)?"
+      ],
+      "follow_up": "Как подтвердить диагноз на живом сервисе?",
+      "priority": "critical",
+      "difficulty": 4,
+      "tags": [
+        "debug",
+        "code",
+        "mutex"
+      ]
+    },
+    {
+      "id": "deadlock-q-06",
+      "type": "debug",
+      "level": "L4",
+      "question": "Был ли у вас реальный случай с deadlock? Разбери типичный: как проявился, как нашли, как исправили.",
+      "context": "Go-сервис перестал отвечать на часть запросов: процесс жив, CPU почти ноль, в логах ошибок нет, число goroutine растёт.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Симптом указывает на зависание, а не на нагрузку: goroutine стоят, CPU не тратят. Шаги:\n- снять goroutine dump — `curl localhost:6060/debug/pprof/goroutine?debug=2` или `kill -QUIT <pid>`;\n- найти goroutine, которые много минут висят в `sync.Mutex.Lock`, `chan send`, `chan receive` или `sync.WaitGroup.Wait`, и по стекам восстановить цикл: кто что держит и чего ждёт (классика — G1 держит A и ждёт B, G2 держит B и ждёт A);\n- исправить: единый порядок захвата, `defer Unlock`, согласованный протокол каналов, таймауты через `context`;\n- проверить: нагрузочный тест со встречными операциями и метрика числа goroutine после релиза.",
+      "key_points": [
+        "симптом: процесс жив, CPU низкий, goroutine растут",
+        "goroutine dump (pprof / SIGQUIT)",
+        "поиск цикла по стекам",
+        "fix: порядок захвата / протокол каналов / таймауты",
+        "проверка нагрузкой и метрикой goroutine"
+      ],
+      "common_mistakes": [
+        "Перезапускать сервис без снятия дампа — улика пропадает",
+        "Искать проблему через `-race`"
+      ],
+      "hints": [
+        "Какой инструмент показывает, что делает каждая goroutine прямо сейчас?"
+      ],
+      "follow_up": "Почему runtime не завершил процесс с fatal error?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "troubleshooting",
+        "production"
+      ]
+    },
+    {
+      "id": "deadlock-q-07",
+      "type": "design",
+      "level": "L5",
+      "question": "Операция атомарно меняет два объекта, каждый защищён своим mutex (перевод между счетами, перемещение товара между складами). Как спроектируешь её, чтобы исключить deadlock?",
+      "context": "Операции идут конкурентно в любых направлениях; объекты могут совпадать.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Основной вариант — единый порядок захвата по стабильному ключу (ID): всегда сначала объект с меньшим ID. Отдельно обработать случай, когда объекты совпадают. Альтернативы: одна goroutine-владелец (single writer), которая принимает команды через канал, — блокировки не нужны, операции сериализуются; один lock на всю группу объектов — проще, но хуже параллелизм. На ожидание — таймаут через `context`, чтобы возможная ошибка проявилась как ошибка, а не как вечное зависание.",
+      "key_points": [
+        "единый порядок захвата по ID",
+        "обработка совпадающих объектов",
+        "альтернатива: single writer goroutine + channel",
+        "крупный lock — проще, но contention",
+        "таймауты на ожидании"
+      ],
+      "common_mistakes": [
+        "Лочить в порядке аргументов функции",
+        "Решать проблему через `time.Sleep` или retry без изменения порядка"
+      ],
+      "hints": [
+        "Что должно быть одинаковым для всех goroutine, чтобы цикл стал невозможен?"
+      ],
+      "follow_up": "Как проверить решение тестом?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "design"
+      ]
+    },
+    {
+      "id": "deadlock-q-08",
+      "type": "decision",
+      "level": "L6",
+      "question": "Для защиты от зависаний на двух mutex предлагают три варианта. Что выберешь и какой trade-off примешь?",
+      "context": "A) единый порядок захвата блокировок по ID;\nB) `TryLock` с таймаутом и повтором при неудаче;\nC) один глобальный mutex на все объекты.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "По умолчанию A: устраняет цикл ожидания без накладных расходов и сохраняет параллелизм. Цена — неявное правило, которое нужно соблюдать во всём коде. C — самое простое и корректное, но все операции сериализуются, и под нагрузкой mutex становится узким местом; годится при низкой нагрузке. B — худший вариант: `sync.Mutex.TryLock` есть с Go 1.18, но документация отмечает, что корректные случаи его использования редки. Повторы дают livelock и нагрузку, а причина проблемы маскируется.",
+      "key_points": [
+        "A — нет цикла, сохраняется параллелизм",
+        "цена A — дисциплина порядка",
+        "C — просто, но contention",
+        "B — livelock и маскировка причины"
+      ],
+      "common_mistakes": [
+        "Выбирать C, не упомянув потерю параллелизма",
+        "Считать retry решением deadlock"
+      ],
+      "hints": [
+        "Какой вариант убирает условие циклического ожидания напрямую?"
+      ],
+      "follow_up": "При какой нагрузке вариант C станет приемлемым?",
+      "priority": "secondary",
+      "difficulty": 5,
+      "tags": [
+        "tradeoff"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "deadlock-we-01",
+      "title": "Зависание сервиса: от goroutine dump до исправления порядка захвата",
+      "problem": "После релиза Go-сервис раз в несколько часов перестаёт отвечать на часть запросов. Процесс жив, CPU низкий, число goroutine растёт.",
+      "context": "В сервисе есть операции, которые одновременно блокируют два объекта своими mutex.",
+      "solution": {
+        "steps": [
+          "Симптом: CPU низкий при растущем числе goroutine — goroutine ждут, а не работают. Это зависание, а не перегрузка.",
+          "Сбор данных: снять goroutine dump до перезапуска — `curl localhost:6060/debug/pprof/goroutine?debug=2` или `kill -QUIT <pid>`.",
+          "Анализ: в дампе много goroutine вида `[sync.Mutex.Lock, 37 minutes]` в `Transfer`; стеки показывают, что одна держит mutex счёта A и ждёт B, другая — наоборот.",
+          "Причина: встречные операции захватывают блокировки в порядке аргументов, поэтому возникает цикл ожидания.",
+          "Исправление: захват в едином порядке по ID, отдельная ветка для совпадающих объектов.",
+          "Проверка: нагрузочный тест со встречными операциями, алерт на метрику числа goroutine."
+        ],
+        "code": "func Transfer(from, to *Account, amount int) {\n    if from == to {\n        return\n    }\n    first, second := from, to\n    if to.ID < from.ID {\n        first, second = to, from\n    }\n    first.mu.Lock()\n    defer first.mu.Unlock()\n    second.mu.Lock()\n    defer second.mu.Unlock()\n    from.balance -= amount\n    to.balance += amount\n}"
+      },
+      "why_it_works": "При едином порядке любая goroutine берёт «больший» mutex только после «меньшего», поэтому цикл ожидания невозможен — одно из условий deadlock снято.",
+      "alternatives": [
+        "Одна goroutine-владелец счетов, которая принимает команды через канал",
+        "Один mutex на всю группу счетов"
+      ],
+      "tradeoffs": [
+        "Порядок захвата — дисциплина, которую нужно соблюдать во всём коде",
+        "Single writer сериализует операции и может стать узким местом"
+      ],
+      "common_mistakes": [
+        "Перезапустить сервис без дампа",
+        "Лечить таймаутом, не устранив цикл",
+        "Забыть случай from == to"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "deadlock-pr-01",
+      "type": "debug",
+      "title": "Конвейер зависает при запуске",
+      "task": "Программа должна посчитать квадраты чисел в воркерах и напечатать их, но завершается с `fatal error: all goroutines are asleep - deadlock!`. Найди причину и исправь.\n```go\nfunc main() {\n    jobs := []int{1, 2, 3}\n    results := make(chan int)\n    var wg sync.WaitGroup\n    for _, j := range jobs {\n        wg.Add(1)\n        go func(j int) {\n            defer wg.Done()\n            results <- j * j\n        }(j)\n    }\n    wg.Wait()\n    close(results)\n    for r := range results {\n        fmt.Println(r)\n    }\n}\n```",
+      "constraints": [
+        "Воркеров столько же, сколько задач",
+        "Все результаты должны быть прочитаны",
+        "Канал должен быть закрыт после завершения всех воркеров"
+      ],
+      "expected_output": "1, 4, 9 в любом порядке",
+      "solution": {
+        "description": "Воркеры блокируются на отправке в unbuffered `results`: читатель появится только после `wg.Wait()`. А `wg.Wait()` ждёт воркеров, которые не могут завершиться. Цикл ожидания: main ждёт воркеров, воркеры ждут main. Исправление: ждать и закрывать канал в отдельной goroutine, а читать в main. Альтернатива — buffered канал размером `len(jobs)`, но она работает, только пока число результатов известно заранее.",
+        "code": "go func() {\n    wg.Wait()\n    close(results)\n}()\nfor r := range results {\n    fmt.Println(r)\n}"
+      },
+      "evaluation_points": [
+        "Понял, что unbuffered send ждёт получателя",
+        "Нашёл цикл: main в Wait ↔ воркеры в send",
+        "Вынес Wait+close в отдельную goroutine",
+        "Объяснил ограничение buffered-решения"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "go-mutex",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "related"
+    },
+    {
+      "concept_id": "race-condition",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-sync-primitives",
+      "relation": "related"
+    },
+    {
+      "concept_id": "profiling",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Сервис переводов часами работает без ошибок. А под нагрузкой часть запросов перестаёт отвечать: процесс жив, CPU почти ноль, в логах пусто.\n\nРазберёмся, что останавливает goroutine навсегда, почему никто об этом не сообщает и как такую беду найти и исключить.",
+    "beats": [
+      {
+        "problem": "Перевод блокирует счёт отправителя, потом счёт получателя. Одновременно идут встречные переводы A→B и B→A: первая goroutine взяла замок A, вторая — замок B. Теперь каждая ждёт замок, который держит другая. **Что будет?**",
+        "solution": "Ничего — и навсегда. Первая не отпустит A, пока не получит B. Вторая не отпустит B, пока не получит A. Никто не может продолжить, потому что каждый ждёт ресурс другого.\n```text\nG1 держит A → ждёт B\nG2 держит B → ждёт A\n```",
+        "term": "deadlock (взаимная блокировка)",
+        "analogy": "Двое встретились в узком коридоре, и каждый ждёт, пока уступит другой. Никто не отступает — стоят оба."
+      },
+      {
+        "problem": "Маленькая программа в такой ситуации сразу падает с `fatal error: all goroutines are asleep - deadlock!`. **Почему же сервис не упал, а просто завис?**",
+        "solution": "Runtime ловит только полный deadlock — когда заблокированы все goroutine до одной. В сервисе всегда есть живые goroutine: HTTP-сервер ждёт соединений, тикают таймеры. Поэтому зависшие goroutine висят молча, а процесс выглядит здоровым.",
+        "term": "частичный deadlock"
+      },
+      {
+        "problem": "Прогнали тесты с `-race` — чисто. **Почему race detector не нашёл проблему?**",
+        "solution": "Потому что гонки здесь нет. Каждый доступ к балансу честно под mutex: код правильно синхронизирован — и при этом зависает. Race detector ищет несинхронизированный доступ к памяти, а зависания — не его задача.\n\nГонка даёт неверный результат при работающей программе, deadlock — остановку. Инструменты тоже разные.",
+        "term": null
+      },
+      {
+        "problem": "Процесс жив, в логах пусто. **Как увидеть, кто кого ждёт?**",
+        "solution": "Снять стеки всех goroutine: `curl localhost:6060/debug/pprof/goroutine?debug=2`, если подключён `net/http/pprof`, или `kill -QUIT <pid>` — процесс напечатает стеки и завершится. В дампе видно, кто сколько минут стоит в `sync.Mutex.Lock`, `chan send` или `chan receive`. По стекам восстанавливают цикл: G1 держит A и ждёт B, G2 — наоборот.\n\nДамп снимают до перезапуска — после рестарта улика пропадёт.",
+        "term": "goroutine dump"
+      },
+      {
+        "problem": "**Как переписать перевод, чтобы цикл ожидания стал невозможен?**",
+        "solution": "Захватывать замки в едином порядке — например, по возрастанию ID счёта. Тогда обе встречные goroutine сначала идут за меньшим ID: одна его получит, вторая подождёт, и цикла не будет. Перевод самому себе обрабатывают отдельно, иначе goroutine дважды возьмёт один mutex.\n```go\nfirst, second := from, to\nif to.ID < from.ID {\n    first, second = to, from\n}\nfirst.mu.Lock()\ndefer first.mu.Unlock()\nsecond.mu.Lock()\ndefer second.mu.Unlock()\n```",
+        "term": "единый порядок захвата (lock ordering)",
+        "analogy": "Правило для коридора: все держатся правой стороны — и встречные больше не упираются друг в друга."
+      },
+      {
+        "problem": "Mutex нет, только каналы. Две goroutine сначала отправляют друг другу в unbuffered каналы, а читать собираются потом. **Спасают ли каналы от deadlock?**",
+        "solution": "Нет. Отправка в unbuffered канал ждёт получателя, а обе стороны отправляют и никто не читает — тот же цикл ожидания. Лечится согласованным протоколом: одна из сторон должна сначала читать.",
+        "term": null
+      },
+      {
+        "problem": "Воркеры шлют результаты в unbuffered канал, а main сначала делает `wg.Wait()` и только потом читает результаты. **Почему программа зависла?**",
+        "solution": "Main ждёт воркеров, а воркеры ждут main: они не завершатся, пока кто-то не заберёт результат, а читатель появится только после Wait. Цикл может проходить через WaitGroup и каналы, а не только через mutex.\n\nЛечится выносом `wg.Wait(); close(results)` в отдельную goroutine и чтением в main. Похожая ловушка — `Done()` вызывается не на всех путях, и `Wait()` не дождётся нуля.",
+        "term": null
+      },
+      {
+        "problem": "**Чем заплатили за защиту от deadlock?**",
+        "solution": "Порядок захвата — неявное правило: компилятор его не проверит, а при рефакторинге его легко нарушить. Один большой lock вместо нескольких исключает цикл, но сериализует все операции. Таймауты через context превращают вечное зависание в видимую ошибку, но причину не устраняют, а retry может снова попасть в тот же цикл.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Deadlock — goroutine не могут продолжить выполнение, потому что ждут ресурсы друг друга. Классика: G1 держит A → ждёт B, G2 держит B → ждёт A.\n\nRuntime ловит только полный deadlock (`all goroutines are asleep`), частичный в сервисе находят по goroutine dump. Исключают единым порядком захвата блокировок, согласованным протоколом каналов и таймаутами."
+  },
+  "short_answer": {
+    "junior": "Deadlock — это когда goroutine ждут друг друга и никто не может продолжить. Классика: одна goroutine держит замок A и ждёт B, другая держит B и ждёт A. Программа или её часть зависает навсегда.",
+    "middle": "Deadlock — goroutine не могут продолжить выполнение, потому что ждут ресурсы друг друга. Классика: G1 держит A → ждёт B, G2 держит B → ждёт A.\n\nКак возникает в Go: разный порядок захвата двух mutex, встречная отправка в unbuffered каналы без читателя, `wg.Wait()` при недостающем `Done()`, повторный `Lock` того же mutex. Runtime завершает программу с `fatal error: all goroutines are asleep - deadlock!`, только если заблокированы все goroutine; в сервисе частичный deadlock проходит молча.\n\nКак лечить: единый порядок захвата блокировок, `defer Unlock`, согласованный протокол каналов, таймауты через `context`. Найти — goroutine dump.",
+    "senior": "Всё из middle, плюс:\n- Deadlock возможен, только если выполнены все четыре условия Coffman: взаимное исключение, удержание с ожиданием, нельзя отобрать ресурс, циклическое ожидание. На практике ломают цикл (единый порядок захвата по стабильному ключу, например ID) или удержание с ожиданием (захват всего сразу, таймауты).\n- Диагностика в production: процесс жив, CPU низкий, число goroutine растёт. До рестарта снимают goroutine dump (`/debug/pprof/goroutine?debug=2` или SIGQUIT) и по стекам в `sync.Mutex.Lock`, `chan send`, `chan receive` восстанавливают цикл.\n- `-race` и `go vet` deadlock не находят: зависающий код может быть полностью синхронизирован.\n- Метрика числа goroutine с алертом и `net/http/pprof` на внутреннем порту позволяют увидеть зависание раньше клиентов.\n- Trade-offs: порядок захвата — дисциплина, которую легко нарушить; один крупный lock исключает deadlock ценой параллелизма; `TryLock` с повтором маскирует причину и может дать livelock.\n- Livelock — goroutine активно работают, но не продвигаются; при deadlock они стоят и не тратят CPU.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "Цикл ожидания",
+          "mermaid": "flowchart LR\n  G1([\"Goroutine 1\"]) -->|ждёт| B[\"замок B\"]\n  B -->|\"занят ею\"| G2([\"Goroutine 2\"])\n  G2 -->|ждёт| A[\"замок A\"]\n  A -->|\"занят ею\"| G1",
+          "caption": "Круг замкнулся: каждая goroutine ждёт замок, который держит другая, и никто не отпустит свой первым."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Захват двух mutex в разном порядке",
+          "mermaid": "sequenceDiagram\n  participant G1 as Goroutine 1\n  participant A as mu A\n  participant B as mu B\n  participant G2 as Goroutine 2\n  G1->>A: Lock A — захватила\n  G2->>B: Lock B — захватила\n  G1->>B: Lock B — занят, ждёт\n  G2->>A: Lock A — занят, ждёт\n  Note over G1,G2: цикл ожидания — обе стоят навсегда",
+          "steps": [
+            "Goroutine 1 захватывает mutex A.",
+            "Почти одновременно Goroutine 2 захватывает mutex B.",
+            "Goroutine 1 хочет B, но он у Goroutine 2 — ждёт.",
+            "Goroutine 2 хочет A, но он у Goroutine 1 — тоже ждёт.",
+            "Никто не отпустит свой замок, пока не получит второй. Если это не все goroutine программы, runtime ничего не скажет — зависание найдут только по goroutine dump."
+          ],
+          "caption": "Каждая goroutine по отдельности написана правильно, deadlock даёт только разный порядок захвата."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Лечение: единый порядок захвата по ID",
+          "mermaid": "sequenceDiagram\n  participant G1 as перевод 1 → 2\n  participant A as mu счёта 1\n  participant B as mu счёта 2\n  participant G2 as перевод 2 → 1\n  Note over G1,G2: правило — сначала замок счёта с меньшим ID\n  G1->>A: Lock — захватила\n  G2->>A: Lock — занят, ждёт\n  G1->>B: Lock — захватила, перевод выполнен\n  G1->>B: Unlock\n  G1->>A: Unlock\n  A-->>G2: захватила, дальше берёт счёт 2",
+          "steps": [
+            "Два встречных перевода. Правило: сначала всегда блокируем счёт с меньшим ID, независимо от направления перевода.",
+            "Перевод 1 → 2 берёт замок счёта 1.",
+            "Перевод 2 → 1 тоже начинает со счёта 1 (ID меньше), а не со своего «исходного» счёта 2. Замок занят — ждёт, **ничего не удерживая**.",
+            "Перевод 1 → 2 спокойно берёт второй замок и выполняет перевод.",
+            "Отпускает счёт 2.",
+            "Отпускает счёт 1.",
+            "Второй перевод получает оба замка по очереди. Цикла нет — только ожидание в очереди."
+          ],
+          "caption": "Когда все берут замки в одном порядке, циклическое ожидание невозможно: одно из условий Coffman сломано."
+        }
+      ]
+    }
+  }
+}

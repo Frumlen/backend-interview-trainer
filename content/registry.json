@@ -1,0 +1,491 @@
+{
+  "fragments": {
+    "02-network": [
+      "tcp",
+      "udp",
+      "http",
+      "http-methods",
+      "http-status-codes",
+      "http2",
+      "http3-quic"
+    ],
+    "03-databases": [
+      "postgresql-index",
+      "postgresql-index-types",
+      "postgresql-composite-index",
+      "postgresql-index-not-used",
+      "postgresql-explain",
+      "postgresql-slow-query",
+      "sql-join"
+    ],
+    "05-algorithms": [
+      "algo-interview-process",
+      "big-o-complexity",
+      "algo-edge-cases",
+      "hash-map"
+    ],
+    "06-go-runtime": [
+      "go-stack-vs-heap",
+      "go-gc",
+      "cpython-gc",
+      "profiling",
+      "go-goroutine",
+      "go-scheduler-gmp"
+    ],
+    "07-go-slice": [
+      "go-array",
+      "go-slice",
+      "go-slice-append",
+      "go-subslice",
+      "go-slice-in-function"
+    ],
+    "08-go-concurrency": [
+      "concurrency-vs-parallelism",
+      "race-condition",
+      "go-sync-primitives",
+      "go-mutex",
+      "go-channel",
+      "deadlock",
+      "go-loop-variable"
+    ],
+    "11-system-design": [
+      "system-design-approach",
+      "feed-fan-out",
+      "sd-messenger",
+      "sd-web-search",
+      "sd-instagram"
+    ]
+  },
+  "concepts": [
+    {
+      "id": "tcp",
+      "title": "TCP",
+      "domain": "Сеть / TCP и UDP",
+      "level": "L2",
+      "order": 110,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "udp",
+      "title": "UDP",
+      "domain": "Сеть / TCP и UDP",
+      "level": "L3",
+      "order": 120,
+      "parent_id": null,
+      "prerequisites": [
+        "tcp"
+      ]
+    },
+    {
+      "id": "http",
+      "title": "HTTP: модель запрос/ответ",
+      "domain": "Сеть / HTTP",
+      "level": "L2",
+      "order": 130,
+      "parent_id": null,
+      "prerequisites": [
+        "tcp"
+      ]
+    },
+    {
+      "id": "http-methods",
+      "title": "HTTP-методы",
+      "domain": "Сеть / HTTP",
+      "level": "L2",
+      "order": 140,
+      "parent_id": "http",
+      "prerequisites": [
+        "http"
+      ]
+    },
+    {
+      "id": "http-status-codes",
+      "title": "HTTP-коды ответа",
+      "domain": "Сеть / HTTP",
+      "level": "L1",
+      "order": 150,
+      "parent_id": "http",
+      "prerequisites": [
+        "http"
+      ]
+    },
+    {
+      "id": "http2",
+      "title": "HTTP/2",
+      "domain": "Сеть / HTTP",
+      "level": "L2",
+      "order": 160,
+      "parent_id": null,
+      "prerequisites": [
+        "http"
+      ]
+    },
+    {
+      "id": "http3-quic",
+      "title": "HTTP/3 и QUIC",
+      "domain": "Сеть / HTTP",
+      "level": "L6",
+      "order": 170,
+      "parent_id": null,
+      "prerequisites": [
+        "http2",
+        "udp"
+      ]
+    },
+    {
+      "id": "postgresql-index",
+      "title": "Индекс",
+      "domain": "Базы данных / Индексы",
+      "level": "L3",
+      "order": 210,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "postgresql-index-types",
+      "title": "Типы индексов: B-tree, Hash, GIN, GiST, BRIN",
+      "domain": "Базы данных / Индексы",
+      "level": "L3",
+      "order": 220,
+      "parent_id": "postgresql-index",
+      "prerequisites": [
+        "postgresql-index"
+      ]
+    },
+    {
+      "id": "postgresql-composite-index",
+      "title": "Составной индекс",
+      "domain": "Базы данных / Индексы",
+      "level": "L3",
+      "order": 230,
+      "parent_id": "postgresql-index",
+      "prerequisites": [
+        "postgresql-index"
+      ]
+    },
+    {
+      "id": "postgresql-explain",
+      "title": "EXPLAIN ANALYZE и план выполнения",
+      "domain": "Базы данных / Медленный запрос",
+      "level": "L3",
+      "order": 250,
+      "parent_id": null,
+      "prerequisites": [
+        "postgresql-index"
+      ]
+    },
+    {
+      "id": "postgresql-index-not-used",
+      "title": "Почему планировщик не использует индекс",
+      "domain": "Базы данных / Индексы",
+      "level": "L4",
+      "order": 240,
+      "parent_id": "postgresql-index",
+      "prerequisites": [
+        "postgresql-index",
+        "postgresql-explain"
+      ]
+    },
+    {
+      "id": "postgresql-slow-query",
+      "title": "Диагностика медленного запроса",
+      "domain": "Базы данных / Медленный запрос",
+      "level": "L4",
+      "order": 260,
+      "parent_id": null,
+      "prerequisites": [
+        "postgresql-explain"
+      ]
+    },
+    {
+      "id": "sql-join",
+      "title": "JOIN",
+      "domain": "Базы данных / JOIN",
+      "level": "L3",
+      "order": 270,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "algo-interview-process",
+      "title": "Как решать алгоритмическую задачу на интервью",
+      "domain": "Алгоритмы",
+      "level": "L3",
+      "order": 410,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "big-o-complexity",
+      "title": "Временная и пространственная сложность",
+      "domain": "Алгоритмы",
+      "level": "L2",
+      "order": 420,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "algo-edge-cases",
+      "title": "Граничные случаи и проверка решения",
+      "domain": "Алгоритмы",
+      "level": "L4",
+      "order": 430,
+      "parent_id": null,
+      "prerequisites": [
+        "algo-interview-process"
+      ]
+    },
+    {
+      "id": "hash-map",
+      "title": "Hash map как инструмент решения",
+      "domain": "Алгоритмы",
+      "level": "L3",
+      "order": 440,
+      "parent_id": null,
+      "prerequisites": [
+        "big-o-complexity"
+      ]
+    },
+    {
+      "id": "go-stack-vs-heap",
+      "title": "Stack vs heap и escape analysis",
+      "domain": "Go / Память и профилирование",
+      "level": "L2",
+      "order": 510,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "go-gc",
+      "title": "Garbage collector в Go",
+      "domain": "Go / Garbage Collector",
+      "level": "L4",
+      "order": 505,
+      "parent_id": null,
+      "prerequisites": [
+        "go-stack-vs-heap"
+      ]
+    },
+    {
+      "id": "cpython-gc",
+      "title": "GC в CPython",
+      "domain": "Go / Память и профилирование",
+      "level": "L2",
+      "order": 530,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "profiling",
+      "title": "Профилирование: подход и инструменты",
+      "domain": "Go / Память и профилирование",
+      "level": "L4",
+      "order": 540,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "go-goroutine",
+      "title": "Goroutine vs OS thread",
+      "domain": "Go / Планировщик",
+      "level": "L2",
+      "order": 550,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "go-scheduler-gmp",
+      "title": "Планировщик Go: G, M, P",
+      "domain": "Go / Планировщик",
+      "level": "L4",
+      "order": 560,
+      "parent_id": null,
+      "prerequisites": [
+        "go-goroutine"
+      ]
+    },
+    {
+      "id": "go-array",
+      "title": "Array",
+      "domain": "Go / Slice",
+      "level": "L1",
+      "order": 610,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "go-slice",
+      "title": "Slice",
+      "domain": "Go / Slice",
+      "level": "L3",
+      "order": 620,
+      "parent_id": null,
+      "prerequisites": [
+        "go-array"
+      ]
+    },
+    {
+      "id": "go-slice-append",
+      "title": "append и реаллокация",
+      "domain": "Go / Slice",
+      "level": "L3",
+      "order": 630,
+      "parent_id": "go-slice",
+      "prerequisites": [
+        "go-slice"
+      ]
+    },
+    {
+      "id": "go-subslice",
+      "title": "Subslice: общий backing array и удержание памяти",
+      "domain": "Go / Slice",
+      "level": "L4",
+      "order": 640,
+      "parent_id": "go-slice",
+      "prerequisites": [
+        "go-slice",
+        "go-slice-append"
+      ]
+    },
+    {
+      "id": "go-slice-in-function",
+      "title": "Передача slice в функцию",
+      "domain": "Go / Slice",
+      "level": "L3",
+      "order": 650,
+      "parent_id": "go-slice",
+      "prerequisites": [
+        "go-slice",
+        "go-slice-append"
+      ]
+    },
+    {
+      "id": "concurrency-vs-parallelism",
+      "title": "Concurrency vs parallelism",
+      "domain": "Go / Конкурентность",
+      "level": "L1",
+      "order": 710,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "race-condition",
+      "title": "Race condition и data race",
+      "domain": "Go / Конкурентность",
+      "level": "L4",
+      "order": 720,
+      "parent_id": null,
+      "prerequisites": [
+        "go-goroutine"
+      ]
+    },
+    {
+      "id": "go-sync-primitives",
+      "title": "Примитивы синхронизации",
+      "domain": "Go / Конкурентность",
+      "level": "L3",
+      "order": 730,
+      "parent_id": null,
+      "prerequisites": [
+        "race-condition"
+      ]
+    },
+    {
+      "id": "go-mutex",
+      "title": "Mutex",
+      "domain": "Go / Конкурентность",
+      "level": "L3",
+      "order": 740,
+      "parent_id": "go-sync-primitives",
+      "prerequisites": [
+        "race-condition"
+      ]
+    },
+    {
+      "id": "go-channel",
+      "title": "Channel",
+      "domain": "Go / Конкурентность",
+      "level": "L3",
+      "order": 750,
+      "parent_id": "go-sync-primitives",
+      "prerequisites": [
+        "go-goroutine"
+      ]
+    },
+    {
+      "id": "deadlock",
+      "title": "Deadlock",
+      "domain": "Go / Конкурентность",
+      "level": "L4",
+      "order": 760,
+      "parent_id": null,
+      "prerequisites": [
+        "go-mutex"
+      ]
+    },
+    {
+      "id": "go-loop-variable",
+      "title": "Итерационная переменная и замыкания (Go 1.22)",
+      "domain": "Go / Конкурентность",
+      "level": "L4",
+      "order": 770,
+      "parent_id": null,
+      "prerequisites": [
+        "go-goroutine"
+      ]
+    },
+    {
+      "id": "system-design-approach",
+      "title": "Как вести system design интервью",
+      "domain": "System Design",
+      "level": "L5",
+      "order": 1010,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "feed-fan-out",
+      "title": "Fan-out on write vs fan-out on read",
+      "domain": "System Design",
+      "level": "L6",
+      "order": 1020,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "sd-messenger",
+      "title": "System design: мессенджер",
+      "domain": "System Design",
+      "level": "L5",
+      "order": 1030,
+      "parent_id": null,
+      "prerequisites": [
+        "system-design-approach"
+      ]
+    },
+    {
+      "id": "sd-web-search",
+      "title": "System design: поисковая система",
+      "domain": "System Design",
+      "level": "L5",
+      "order": 1040,
+      "parent_id": null,
+      "prerequisites": [
+        "system-design-approach"
+      ]
+    },
+    {
+      "id": "sd-instagram",
+      "title": "System design: Instagram",
+      "domain": "System Design",
+      "level": "L5",
+      "order": 1050,
+      "parent_id": null,
+      "prerequisites": [
+        "system-design-approach",
+        "feed-fan-out"
+      ]
+    }
+  ]
+}

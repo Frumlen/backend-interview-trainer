@@ -1,0 +1,70 @@
+{
+  "relations": [
+    {
+      "from": "postgresql-index-types",
+      "to": "postgresql-index",
+      "type": "part_of"
+    },
+    {
+      "from": "postgresql-composite-index",
+      "to": "postgresql-index",
+      "type": "extends"
+    },
+    {
+      "from": "postgresql-index-not-used",
+      "to": "postgresql-explain",
+      "type": "related"
+    },
+    {
+      "from": "postgresql-index-not-used",
+      "to": "postgresql-slow-query",
+      "type": "causes"
+    },
+    {
+      "from": "postgresql-composite-index",
+      "to": "postgresql-index-not-used",
+      "type": "related"
+    },
+    {
+      "from": "sql-join",
+      "to": "postgresql-explain",
+      "type": "related"
+    },
+    {
+      "from": "postgresql-slow-query",
+      "to": "sql-join",
+      "type": "related"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-postgresql-performance",
+      "title": "PostgreSQL Performance",
+      "description": "Индекс → составной индекс → EXPLAIN → диагностика медленного запроса и JOIN: найти по плану, что дорого, и исправить.",
+      "concept_ids": [
+        "postgresql-index",
+        "postgresql-index-types",
+        "postgresql-composite-index",
+        "postgresql-index-not-used",
+        "postgresql-explain",
+        "postgresql-slow-query",
+        "sql-join"
+      ],
+      "practice_ids": [
+        "postgresql-explain-pr-01",
+        "postgresql-slow-query-pr-01",
+        "sql-join-pr-01",
+        "postgresql-index-pr-01",
+        "postgresql-index-types-pr-01",
+        "postgresql-composite-index-pr-01",
+        "postgresql-index-not-used-pr-01"
+      ],
+      "question_ids": [
+        "postgresql-explain-q-06",
+        "postgresql-explain-q-07",
+        "postgresql-slow-query-q-07",
+        "sql-join-q-09"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "relations": [
+    {
+      "from": "feed-fan-out",
+      "to": "sd-instagram",
+      "type": "part_of"
+    },
+    {
+      "from": "sd-web-search",
+      "to": "postgresql-index",
+      "type": "contrasts_with"
+    }
+  ],
+  "practice_sets": [
+    {
+      "id": "ps-system-design",
+      "title": "System Design",
+      "description": "Три классические задачи и ключевые решения внутри них: требования → архитектура → хранение → отказы → масштабирование.",
+      "concept_ids": [
+        "system-design-approach",
+        "feed-fan-out",
+        "sd-messenger",
+        "sd-web-search",
+        "sd-instagram"
+      ],
+      "practice_ids": [
+        "system-design-approach-pr-01",
+        "feed-fan-out-pr-01",
+        "sd-messenger-pr-01",
+        "sd-messenger-pr-02",
+        "sd-web-search-pr-01",
+        "sd-instagram-pr-01"
+      ],
+      "question_ids": [
+        "sd-messenger-q-02",
+        "sd-web-search-q-02",
+        "sd-instagram-q-02",
+        "sd-messenger-q-13",
+        "feed-fan-out-q-04",
+        "sd-instagram-q-10",
+        "sd-web-search-q-11"
+      ]
+    }
+  ]
+}

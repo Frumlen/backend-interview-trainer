@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тренажёр backend-собеседования</title>
+<style>
+{{VENDOR_CSS}}
+</style>
+<style>
+{{STYLES}}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="icon-btn menu-btn" data-action="toggle-sidebar" aria-label="Открыть навигацию" aria-controls="sidebar">☰</button>
+    <a class="brand" href="#home" id="brand">Тренажёр</a>
+    <nav class="tabs" id="tabs" aria-label="Режимы"></nav>
+    <span class="spacer"></span>
+    <button class="icon-btn" data-action="toggle-theme" aria-label="Переключить тему" title="Тема">◐</button>
+    <a class="icon-btn" href="#settings" aria-label="Настройки и прогресс" title="Настройки">⚙</a>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Концепции курса"></aside>
+  <div class="backdrop" data-action="toggle-sidebar"></div>
+  <main class="main" id="main" tabindex="-1"></main>
+</div>
+<div id="live" class="sr-only" aria-live="polite"></div>
+<script id="course-data" type="application/json">{{COURSE_JSON}}</script>
+<script>
+{{VENDOR_JS}}
+</script>
+<script>
+{{APP_JS}}
+</script>
+</body>
+</html>

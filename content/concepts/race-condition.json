@@ -1,0 +1,581 @@
+{
+  "id": "race-condition",
+  "title": "Race condition и data race",
+  "domain": "Go / Конкурентность",
+  "level": "L4",
+  "tags": [
+    "go",
+    "concurrency",
+    "race",
+    "debugging"
+  ],
+  "prerequisites": [
+    "go-goroutine"
+  ],
+  "summary": "Race condition — ситуация, когда результат зависит от порядка конкурентного выполнения операций. Классический пример — `counter++` из нескольких goroutine без синхронизации. В Go такие ошибки ищут race detector'ом: `go test -race ./...` или `go run -race .`.",
+  "mental_model": {
+    "type": "sequence",
+    "description": "`counter++` — это три шага: read → increment → write. Если две goroutine перемежают эти шаги, одно увеличение теряется.",
+    "elements": [
+      "G1",
+      "counter",
+      "G2"
+    ],
+    "relations": [
+      "G1 -> counter: read 0",
+      "G2 -> counter: read 0",
+      "G1 -> counter: write 1",
+      "G2 -> counter: write 1 (update G1 потерян)"
+    ]
+  },
+  "problem": {
+    "question": "Почему счётчик, который 1000 goroutine увеличивают по одному разу, иногда показывает 987, а не 1000?",
+    "context": "Несколько goroutine одновременно изменяют одну переменную без синхронизации.",
+    "why_it_matters": "Такие ошибки недетерминированы: тесты проходят, а в production данные тихо портятся."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Общее состояние",
+        "description": "Несколько goroutine обращаются к одной переменной, и хотя бы одна из них пишет."
+      },
+      {
+        "order": 2,
+        "title": "Неатомарная операция",
+        "description": "`counter++` — это read-modify-write: прочитать значение, увеличить, записать обратно. Между шагами другая goroutine может выполнить свои шаги."
+      },
+      {
+        "order": 3,
+        "title": "Перемежение",
+        "description": "Результат зависит от того, в каком порядке планировщик и CPU выполнят шаги разных goroutine. Отсюда недетерминированность."
+      },
+      {
+        "order": 4,
+        "title": "Нет happens-before",
+        "description": "Без синхронизации (mutex, channel, atomic) по модели памяти Go нет гарантии, что одна goroutine увидит запись другой. Компилятор и CPU вправе переупорядочивать операции."
+      },
+      {
+        "order": 5,
+        "title": "Обнаружение",
+        "description": "Race detector (`-race`) инструментирует обращения к памяти и во время выполнения сообщает о конфликтных доступах без синхронизации."
+      }
+    ],
+    "key_objects": [
+      "shared variable",
+      "goroutine",
+      "race detector",
+      "happens-before"
+    ],
+    "important_distinctions": [
+      "Data race — одновременный доступ к одной памяти из нескольких goroutine без синхронизации, хотя бы один доступ — запись. Race condition — более общая логическая ошибка: результат зависит от порядка событий.",
+      "Race condition возможна и без data race: например, check-then-act, где каждая операция по отдельности под mutex, но между ними состояние меняется."
+    ]
+  },
+  "minimal_example": {
+    "language": "go",
+    "code": "var counter int\nvar wg sync.WaitGroup\nfor i := 0; i < 1000; i++ {\n    wg.Add(1)\n    go func() {\n        defer wg.Done()\n        counter++ // data race\n    }()\n}\nwg.Wait()\nfmt.Println(counter)",
+    "explanation": "`counter++` из нескольких goroutine без синхронизации. Запуск с `go run -race .` покажет отчёт WARNING: DATA RACE.",
+    "expected_result": "Недетерминированно: 1000 или меньше; с -race — отчёт о гонке"
+  },
+  "details": [
+    {
+      "title": "Как найти",
+      "description": "`go test -race ./...` или `go run -race .`. Это нужно помнить обязательно.",
+      "importance": "critical"
+    },
+    {
+      "title": "Detector видит только выполненные пути",
+      "description": "Race detector находит гонки только в тех участках кода, которые реально выполнились во время запуска. Отсутствие отчёта не доказывает отсутствие гонок, поэтому нужны тесты с конкурентными сценариями.",
+      "importance": "important"
+    },
+    {
+      "title": "Цена -race",
+      "description": "Инструментирование заметно замедляет выполнение (в разы) и увеличивает потребление памяти. Обычно гоняют в CI и на тестах, а не в production.",
+      "importance": "important"
+    },
+    {
+      "title": "Способы устранения",
+      "description": "Защитить общее состояние `sync.Mutex`; для простых счётчиков использовать `sync/atomic`; либо не разделять состояние и передавать владение данными через channel.",
+      "importance": "critical"
+    },
+    {
+      "title": "Data race в Go — неопределённое поведение для составных значений",
+      "description": "Гонка на map может завершиться `fatal error: concurrent map writes`. Гонка на interface или slice может дать «разорванное» значение (torn read).",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Если хотя бы одна goroutine пишет в переменную, все доступы к ней должны быть синхронизированы.",
+      "why": "Иначе по модели памяти Go нет гарантий видимости и порядка, и это data race."
+    },
+    {
+      "statement": "Результат корректной конкурентной программы не зависит от порядка планирования goroutine.",
+      "why": "Зависимость от порядка — определение race condition."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "race-condition-fm-lost-update",
+      "title": "Потерянное обновление счётчика",
+      "cause": "`counter++` из нескольких goroutine без синхронизации.",
+      "symptom": "Итоговое значение меньше ожидаемого и меняется от запуска к запуску.",
+      "mechanism": "Две goroutine читают одно и то же старое значение и обе записывают старое+1 — одно увеличение теряется.",
+      "fix": "`sync.Mutex` вокруг инкремента или `atomic.AddInt64` / `atomic.Int64`.",
+      "prevention": "Гонять тесты с `-race` в CI."
+    },
+    {
+      "id": "race-condition-fm-check-then-act",
+      "title": "Check-then-act",
+      "cause": "Проверка условия и действие выполняются не атомарно: `if _, ok := cache[k]; !ok { cache[k] = load() }` под разными захватами lock или без lock.",
+      "symptom": "Двойная загрузка, дубликаты, нарушение уникальности.",
+      "mechanism": "Между проверкой и действием другая goroutine меняет состояние. Проверка устаревает к моменту действия.",
+      "fix": "Держать lock на всю операцию проверка+действие, использовать `sync.Once` / `singleflight` или атомарные операции (CompareAndSwap).",
+      "prevention": "Проектировать критические секции вокруг инварианта, а не вокруг отдельных строк."
+    },
+    {
+      "id": "race-condition-fm-map",
+      "title": "Concurrent map writes",
+      "cause": "Запись в обычный `map` из нескольких goroutine.",
+      "symptom": "Процесс падает с `fatal error: concurrent map writes` (не panic, recover не поможет).",
+      "mechanism": "Runtime обнаруживает одновременную модификацию map и аварийно завершает программу.",
+      "fix": "Mutex/RWMutex вокруг map или `sync.Map` для специфичных сценариев (много чтений, ключи пишутся редко).",
+      "prevention": null
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Синхронизация гарантирует корректность и видимость изменений между goroutine."
+    ],
+    "costs": [
+      "Mutex и atomic добавляют накладные расходы и contention при высокой конкуренции.",
+      "Race detector замедляет выполнение, поэтому применяется в тестах и CI."
+    ],
+    "risks": [
+      "Слишком крупная критическая секция снижает пропускную способность; слишком мелкая не защищает инвариант (check-then-act)."
+    ],
+    "when_tradeoff_matters": "При выборе между mutex, atomic и channel и при определении границ критической секции."
+  },
+  "usage": {
+    "use_when": [
+      "Каждый раз, когда состояние разделяется между goroutine: проверять, кто пишет и как синхронизирован доступ."
+    ],
+    "avoid_when": [],
+    "signals": [
+      "Недетерминированные результаты и flaky-тесты.",
+      "`fatal error: concurrent map writes`.",
+      "Отчёт `WARNING: DATA RACE` от `-race`."
+    ],
+    "production_considerations": [
+      "Включить `go test -race ./...` в CI.",
+      "Писать тесты, которые реально запускают конкурентные сценарии, иначе detector их не увидит."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "deadlock",
+      "dimension": "Симптом",
+      "difference": "Race condition даёт неверный результат, программа продолжает работать. Deadlock — программа или её часть перестаёт продвигаться.",
+      "why_it_matters": "Разные симптомы — разные инструменты: race detector vs goroutine dump / pprof goroutine."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "race-condition-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое race condition?",
+      "context": null,
+      "expected_answer": "Ситуация, когда результат зависит от порядка конкурентного выполнения операций. Например, `counter++` из нескольких goroutine без синхронизации.",
+      "key_points": [
+        "результат зависит от порядка выполнения",
+        "общее состояние без синхронизации",
+        "пример counter++"
+      ],
+      "common_mistakes": [
+        "Путать с deadlock."
+      ],
+      "hints": [],
+      "follow_up": "Чем data race отличается от race condition?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall"
+      ]
+    },
+    {
+      "id": "race-condition-q-02",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Как обнаружить data race в Go?",
+      "context": null,
+      "expected_answer": "Race detector: `go test -race ./...` или `go run -race .`. Он инструментирует обращения к памяти и во время выполнения сообщает о несинхронизированных конфликтных доступах.",
+      "key_points": [
+        "go test -race ./...",
+        "go run -race .",
+        "работает во время выполнения"
+      ],
+      "common_mistakes": [
+        "Считать, что отсутствие отчёта доказывает отсутствие гонок."
+      ],
+      "hints": [
+        "Флаг компилятора/тестов."
+      ],
+      "follow_up": "Почему -race не включают в production?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "recall",
+        "tooling"
+      ]
+    },
+    {
+      "id": "race-condition-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "Что произойдёт, если несколько горутин одновременно изменяют одну переменную? Объясни на примере `counter++`.",
+      "context": null,
+      "expected_answer": "Это data race, и результат зависит от порядка выполнения. `counter++` не атомарен: это read → increment → write. Две goroutine могут прочитать одно значение (например, 0), обе записать 1 — одно обновление теряется. Кроме того, без синхронизации по модели памяти Go нет гарантий видимости записей между goroutine.",
+      "key_points": [
+        "data race",
+        "read-modify-write не атомарен",
+        "lost update",
+        "нет гарантий видимости без синхронизации"
+      ],
+      "common_mistakes": [
+        "Думать, что инкремент int атомарен на уровне языка.",
+        "Считать, что на одном ядре гонки невозможны."
+      ],
+      "hints": [
+        "Разложи counter++ на шаги."
+      ],
+      "follow_up": "Как исправишь: mutex, atomic или channel — и почему?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "mechanism"
+      ]
+    },
+    {
+      "id": "race-condition-q-04",
+      "type": "predict",
+      "level": "L2",
+      "question": "Что выведет программа? Почему? Что покажет `go run -race .`?",
+      "context": null,
+      "code": "package main\n\nimport (\n    \"fmt\"\n    \"sync\"\n)\n\nfunc main() {\n    var counter int\n    var wg sync.WaitGroup\n    for i := 0; i < 1000; i++ {\n        wg.Add(1)\n        go func() {\n            defer wg.Done()\n            counter++\n        }()\n    }\n    wg.Wait()\n    fmt.Println(counter)\n}",
+      "code_language": "go",
+      "expected_answer": "Результат недетерминирован: 1000 или меньше, от запуска к запуску по-разному. `counter++` выполняется из многих goroutine без синхронизации — это data race с потерянными обновлениями. `go run -race .` выведет `WARNING: DATA RACE` с двумя стеками конфликтующих доступов.",
+      "key_points": [
+        "недетерминированный результат ≤ 1000",
+        "data race на counter",
+        "-race печатает WARNING: DATA RACE"
+      ],
+      "common_mistakes": [
+        "Ответить «всегда 1000, потому что есть WaitGroup» — WaitGroup ждёт завершения, но не синхронизирует доступ к counter."
+      ],
+      "hints": [
+        "Что синхронизирует WaitGroup, а что нет?"
+      ],
+      "follow_up": "Перепиши с atomic.Int64.",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "predict",
+        "code"
+      ]
+    },
+    {
+      "id": "race-condition-q-05",
+      "type": "debug",
+      "level": "L4",
+      "question": "Что здесь неправильно? Почему тесты проходят, а в production дублируются загрузки и иногда падает процесс?",
+      "context": null,
+      "code": "type Cache struct {\n    mu   sync.Mutex\n    data map[string]string\n}\n\nfunc (c *Cache) Get(k string) string {\n    c.mu.Lock()\n    v, ok := c.data[k]\n    c.mu.Unlock()\n    if !ok {\n        v = load(k) // долгий вызов\n        c.data[k] = v\n    }\n    return v\n}",
+      "code_language": "go",
+      "expected_answer": "Две проблемы. (1) Запись `c.data[k] = v` выполняется без lock — это data race на map, возможен `fatal error: concurrent map writes`. (2) Check-then-act: между проверкой и записью другая goroutine тоже не находит ключ и тоже вызывает load — дубли загрузок. Тесты проходят, потому что в них нет конкурентных вызовов, а -race видит только выполненные пути. Исправление: запись под lock с повторной проверкой (double-check), а для дедупликации загрузок — `singleflight` или per-key `sync.Once`. Долгий load лучше не держать под общим lock.",
+      "key_points": [
+        "запись в map без lock",
+        "fatal error: concurrent map writes",
+        "check-then-act → дубли загрузок",
+        "double-check под lock / singleflight",
+        "не держать lock во время долгого I/O"
+      ],
+      "common_mistakes": [
+        "Обернуть весь метод вместе с load в один lock — корректно, но сериализует все загрузки."
+      ],
+      "hints": [
+        "Посмотри, какие строки выполняются под lock."
+      ],
+      "follow_up": "Почему recover не спасёт от concurrent map writes?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "debug",
+        "code"
+      ]
+    },
+    {
+      "id": "race-condition-q-06",
+      "type": "decision",
+      "level": "L3",
+      "question": "Нужно считать количество обработанных сообщений из многих goroutine. Что выберешь: mutex, atomic или channel? Почему?",
+      "context": "Вариант A: `sync.Mutex` вокруг `counter++`.\nВариант B: `atomic.Int64` и `counter.Add(1)`.\nВариант C: goroutine-счётчик, в которую все шлют события по channel.",
+      "expected_answer": "Для одного независимого счётчика — B (atomic): минимальные накладные расходы, нет блокировок, код простой. A корректен и нужен, когда под защитой несколько связанных полей (инвариант между ними). C избыточен для счётчика: channel — для передачи данных и координации, здесь он добавляет лишнюю goroutine и latency.",
+      "key_points": [
+        "atomic для одиночного счётчика",
+        "mutex — когда нужно защитить несколько полей/инвариант",
+        "channel — для передачи данных, не для счётчика"
+      ],
+      "common_mistakes": [
+        "Выбирать channel «потому что это Go-way»."
+      ],
+      "hints": [],
+      "follow_up": "Что изменится, если нужно атомарно обновлять счётчик и timestamp последнего сообщения?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "decision"
+      ]
+    },
+    {
+      "id": "race-condition-q-07",
+      "type": "explain",
+      "level": "L6",
+      "question": "Может ли быть race condition без data race? Приведи пример и объясни, почему race detector его не найдёт.",
+      "context": null,
+      "expected_answer": "Да. Data race — несинхронизированный одновременный доступ к памяти. Race condition — логическая зависимость результата от порядка. Пример: баланс читается под mutex, проверяется `balance >= amount`, lock отпускается, затем списание снова под mutex. Каждый доступ синхронизирован, поэтому data race нет и detector молчит, но две goroutine могут пройти проверку одновременно и увести баланс в минус. Лечится расширением критической секции на всю операцию проверка+изменение (или CAS / транзакцией в БД).",
+      "key_points": [
+        "data race ⊂ проблем с порядком, но не наоборот",
+        "check-then-act под разными захватами lock",
+        "race detector ищет только data race",
+        "критическая секция вокруг инварианта"
+      ],
+      "common_mistakes": [
+        "Считать, что зелёный -race означает корректность конкурентной логики."
+      ],
+      "hints": [
+        "Что проверяет detector — память или бизнес-инвариант?"
+      ],
+      "follow_up": "Как тот же сценарий решается на уровне PostgreSQL?",
+      "priority": "important",
+      "difficulty": 5,
+      "tags": [
+        "expert"
+      ]
+    },
+    {
+      "id": "race-condition-q-08",
+      "type": "explain",
+      "level": "L4",
+      "question": "Был ли у вас реальный случай с race condition или deadlock?",
+      "context": "Разбери типичный случай по схеме: симптом → обнаружение → причина → исправление → проверка.",
+      "expected_answer": "Схема ответа: симптом → как обнаружили → причина → fix → как проверили. Команды: `go test -race ./...`, `go run -race .`.\n\nТипичный случай: in-memory кэш на `map` читается и пишется из нескольких goroutine. Симптом — плавающие данные или падение `fatal error: concurrent map writes`. Обнаружение — прогон тестов с `-race`, который показывает два стека конфликтующих доступов. Причина — разделяемое состояние без синхронизации. Fix — `sync.Mutex`/`sync.RWMutex` вокруг map (или `sync.Map` для подходящих паттернов). Проверка — повторный прогон с `-race` под конкурентной нагрузкой.\n\nДля deadlock: зависание запросов при живом процессе → goroutine dump (pprof `goroutine`) → видно, кто какой lock или channel ждёт → единый порядок захвата блокировок или таймауты.",
+      "key_points": [
+        "схема: симптом → обнаружение → причина → fix → проверка",
+        "go test -race",
+        "разделяемое состояние без синхронизации",
+        "goroutine dump для deadlock"
+      ],
+      "common_mistakes": [
+        "Отвечать «нет» без демонстрации подхода",
+        "Чинить гонку через `time.Sleep`"
+      ],
+      "hints": [
+        "Какой инструмент Go показывает оба конфликтующих доступа?"
+      ],
+      "follow_up": "Как бы вы воспроизвели гонку в тесте?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "race",
+        "debug"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "race-condition-we-01",
+      "title": "Исправление гонки на счётчике",
+      "problem": "`counter++` вызывается из 1000 goroutine, итог недетерминирован, `-race` показывает DATA RACE.",
+      "context": null,
+      "solution": {
+        "steps": [
+          "Bug: неатомарный read-modify-write на общей переменной.",
+          "Minimal fix A: `atomic.Int64` — `counter.Add(1)`, чтение `counter.Load()`.",
+          "Minimal fix B: `sync.Mutex` — `mu.Lock(); counter++; mu.Unlock()`.",
+          "Проверка: `go run -race .` — отчёта нет, результат всегда 1000."
+        ],
+        "code": "var counter atomic.Int64\nvar wg sync.WaitGroup\nfor i := 0; i < 1000; i++ {\n    wg.Add(1)\n    go func() {\n        defer wg.Done()\n        counter.Add(1)\n    }()\n}\nwg.Wait()\nfmt.Println(counter.Load()) // 1000"
+      },
+      "why_it_works": "Atomic-операция выполняет read-modify-write неделимо и создаёт синхронизацию по модели памяти, поэтому обновления не теряются.",
+      "alternatives": [
+        "Mutex — если под защитой несколько связанных полей.",
+        "Шардированные счётчики на goroutine с суммированием в конце — при очень высокой конкуренции."
+      ],
+      "tradeoffs": [
+        "Atomic — быстрее, но подходит только для простых операций над одним значением.",
+        "Mutex — универсальнее, но с contention под высокой нагрузкой."
+      ],
+      "common_mistakes": [
+        "Смешивать atomic-запись и обычное чтение той же переменной — это снова data race."
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "race-condition-pr-01",
+      "type": "debug",
+      "title": "Найти и устранить гонку в кэше",
+      "task": "Сервис кэширует профили пользователей в `map[string]Profile`. Под нагрузкой процесс изредка падает с `fatal error: concurrent map writes`, а в логах видно, что один профиль грузится из БД несколько раз подряд. Опиши, как подтвердишь причину и как исправишь, не сериализуя все загрузки.",
+      "constraints": [
+        "Загрузка профиля из БД — до 100 мс.",
+        "Чтений намного больше, чем записей."
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Подтверждение: тест с параллельными `Get` + `go test -race` покажет гонку на map. Исправление: `sync.RWMutex` — чтение под RLock; при промахе загрузка вне lock, запись под Lock с повторной проверкой. Дубли загрузок убрать через `singleflight.Group` (один load на ключ, остальные ждут результат). Долгий I/O под общим lock не держать.",
+        "code": "func (c *Cache) Get(ctx context.Context, k string) (Profile, error) {\n    c.mu.RLock()\n    p, ok := c.data[k]\n    c.mu.RUnlock()\n    if ok {\n        return p, nil\n    }\n    v, err, _ := c.sf.Do(k, func() (any, error) {\n        return c.load(ctx, k)\n    })\n    if err != nil {\n        return Profile{}, err\n    }\n    p = v.(Profile)\n    c.mu.Lock()\n    c.data[k] = p\n    c.mu.Unlock()\n    return p, nil\n}"
+      },
+      "evaluation_points": [
+        "Назвал data race на map и fatal error",
+        "Назвал check-then-act как причину дублей",
+        "Подтверждение через -race на конкурентном тесте",
+        "Не держит lock во время загрузки",
+        "Дедупликация загрузок (singleflight / once per key)"
+      ],
+      "difficulty": 4
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "go-mutex",
+      "relation": "next"
+    },
+    {
+      "concept_id": "go-sync-primitives",
+      "relation": "next"
+    },
+    {
+      "concept_id": "go-channel",
+      "relation": "related"
+    },
+    {
+      "concept_id": "deadlock",
+      "relation": "related"
+    },
+    {
+      "concept_id": "go-loop-variable",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Сервис считает обработанные сообщения: каждая goroutine после обработки делает `counter++`. Код в одну строку, тесты зелёные. А в production цифры в метриках не сходятся с логами.\n\nРазберёмся, куда пропадают инкременты, почему тесты этого не видят и как такие ошибки находить.",
+    "beats": [
+      {
+        "problem": "1000 goroutine делают `counter++` по одному разу, main ждёт их через WaitGroup и печатает счётчик. Выводит 973, при следующем запуске — 988. **Куда делись инкременты?**",
+        "solution": "`counter++` выглядит как одно действие, но это три шага: прочитать значение, прибавить единицу, записать обратно. Две goroutine могут обе прочитать 41, обе посчитать 42 и обе записать 42. Инкрементов было два, а счётчик вырос на один.\n```text\nG1: read 41          G2: read 41\nG1: write 42         G2: write 42   ← обновление G1 потеряно\n```",
+        "term": "read-modify-write; lost update (потерянное обновление)",
+        "analogy": "Двое одновременно правят один файл без совместного редактирования: каждый сохранил свою версию, и правки первого затёрты."
+      },
+      {
+        "problem": "Иногда программа всё-таки печатает ровно 1000. **От чего зависит результат?**",
+        "solution": "От того, в каком порядке планировщик и процессоры выполнили шаги разных goroutine. Шаги не перемешались — 1000. Перемешались — меньше. Код один и тот же, а результат определяет случайное расписание.",
+        "term": "race condition (состояние гонки)",
+        "analogy": "Двое тянутся к последнему куску пиццы: кому он достанется, решает случай, а не правила."
+      },
+      {
+        "problem": "Но main же дождался всех goroutine через WaitGroup. **Разве WaitGroup не упорядочивает доступ к счётчику?**",
+        "solution": "Нет. WaitGroup гарантирует одно: main продолжит, когда все goroutine закончили. Что они в процессе делали с общей переменной, она никак не упорядочивает — одновременные чтения и записи `counter` остаются.",
+        "term": null
+      },
+      {
+        "problem": "Другой случай: одна goroutine записывает `ready = true`, другая в цикле ждёт, пока флаг станет true. Пишет только одна, терять нечего. **Теперь всё в порядке?**",
+        "solution": "Нет. Без синхронизации модель памяти Go не гарантирует, что вторая goroutine вообще увидит запись, и не гарантирует порядок операций. Компилятор вправе держать значение в регистре, процессор — переставлять записи.\n\nОдновременный доступ к одной памяти из нескольких goroutine без синхронизации, если хотя бы один доступ — запись, — ошибка, даже когда «на моей машине работает».",
+        "term": "data race (гонка данных)"
+      },
+      {
+        "problem": "Как починить счётчик? **Что должно происходить с тремя шагами `counter++`?**",
+        "solution": "Они должны стать одним неделимым действием: пока одна goroutine его выполняет, другая не вклинится. Для одного числа есть atomic, для нескольких связанных полей — mutex:\n```go\nvar counter atomic.Int64\ncounter.Add(1) // неделимый инкремент\n```\nили, если счётчик — обычный `int`:\n```go\nmu.Lock()\ncounter++\nmu.Unlock()\n```\nТретий путь — вообще не делить состояние, а передавать данные между goroutine через channel.",
+        "term": "синхронизация: atomic, mutex, channel"
+      },
+      {
+        "problem": "Гонка проявляется раз в тысячу запусков, и тесты её не ловят. **Как найти её надёжно?**",
+        "solution": "Запустить с race detector. Он инструментирует обращения к памяти и во время выполнения замечает, что две goroutine обратились к одной переменной без синхронизации и хотя бы одна писала. В отчёте — `WARNING: DATA RACE` и два стека: кто писал и кто читал.\n```bash\ngo test -race ./...\ngo run -race .\n```",
+        "term": "race detector (-race)"
+      },
+      {
+        "problem": "`-race` в CI молчит. **Значит, гонок в коде нет?**",
+        "solution": "Не значит. Detector видит только те обращения, которые реально произошли во время прогона. Если тест не вызывает код конкурентно, гонку в нём найти нечем. Поэтому нужны тесты, которые действительно гоняют параллельные вызовы.",
+        "term": null
+      },
+      {
+        "problem": "Баланс проверяется под mutex, списание — тоже под mutex, но между ними lock отпускается. `-race` чист. **Может ли баланс уйти в минус?**",
+        "solution": "Может. Две goroutine по очереди проверили `balance >= 100` и обе увидели 150. Затем обе списали по 100. Каждый доступ к памяти синхронизирован, поэтому data race нет и detector молчит. Но логическая гонка есть: к моменту списания проверка устарела.\n\nЛечится тем, что критическая секция охватывает всю операцию «проверить и изменить», а не отдельные строки.",
+        "term": "check-then-act; race condition без data race"
+      },
+      {
+        "problem": "**Чем платим за защиту от гонок?**",
+        "solution": "Временем и дисциплиной. На mutex goroutine ждут друг друга, и при высокой конкуренции растёт contention. Слишком крупная критическая секция убивает параллельность, слишком мелкая не защищает инвариант. Race detector замедляет программу в разы и ест память, поэтому его гоняют в тестах и CI, а не в production.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Race condition — ситуация, когда результат зависит от порядка конкурентного выполнения операций. Например, `counter++` из нескольких goroutine без синхронизации.\n\nКак найти: `go test -race ./...` или `go run -race .`. Как исправить: atomic для одного значения, mutex для нескольких связанных полей или передача данных через channel вместо общего состояния."
+  },
+  "short_answer": {
+    "junior": "Race condition — ошибка, при которой результат зависит от того, в каком порядке случайно выполнились goroutine. Классический пример — несколько goroutine делают `counter++` без синхронизации, и часть увеличений теряется. В Go такие ошибки ищут флагом `-race`.",
+    "middle": "Race condition — ситуация, когда результат зависит от порядка конкурентного выполнения операций. Например, `counter++` из нескольких goroutine без синхронизации. Как найти: `go test -race ./...` или `go run -race .`.\n\nКак это происходит: `counter++` — это read → increment → write. Две goroutine читают одно значение и обе записывают старое + 1, одно обновление теряется. Кроме того, без синхронизации модель памяти Go не гарантирует, что одна goroutine увидит запись другой.\n\nКак исправить: одно число или флаг — `sync/atomic`; несколько связанных полей — `sync.Mutex`; если состояние можно не делить — передавать данные через channel. `go test -race` включают в CI.",
+    "senior": "Всё из middle, плюс:\n- Data race и race condition — разные вещи. Data race — несинхронизированный доступ к одной памяти, хотя бы один доступ — запись. Race condition шире: check-then-act под двумя разными захватами lock даёт гонку без data race, и `-race` её не найдёт.\n- Race detector видит только выполненные пути: зелёный прогон не доказывает отсутствие гонок, нужны тесты с реальной конкуренцией.\n- `-race` замедляет выполнение в разы и увеличивает потребление памяти — место для него в тестах и CI, а не в production.\n- Гонка на map может закончиться `fatal error: concurrent map writes` — это не panic, recover не поможет. Гонка на interface или slice может дать «разорванное» значение.\n- Критическую секцию проектируют вокруг инварианта: слишком крупная — contention, слишком мелкая — снова check-then-act.\n- WaitGroup ждёт завершения goroutine, но не синхронизирует доступ к данным между ними.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "Как теряется инкремент в counter++",
+          "mermaid": "sequenceDiagram\n  participant G1 as Goroutine 1\n  participant C as counter\n  participant G2 as Goroutine 2\n  Note over C: counter = 0\n  G1->>C: читает 0\n  G2->>C: читает 0\n  Note over G1,G2: каждая считает 0 + 1 = 1\n  G1->>C: пишет 1\n  G2->>C: пишет 1\n  Note over C: counter = 1, а должно быть 2",
+          "steps": [
+            "В начале `counter = 0`. Две goroutine одновременно выполняют `counter++`.",
+            "Goroutine 1 **читает** значение — 0.",
+            "Goroutine 2 успевает прочитать то же значение до записи первой — тоже 0.",
+            "Каждая у себя прибавляет единицу: у обеих получилось 1.",
+            "Goroutine 1 **записывает** 1.",
+            "Goroutine 2 записывает свою 1 поверх — она не знает, что значение уже изменилось.",
+            "Итог — 1 вместо 2: одно увеличение **потеряно**. При другом порядке шагов результат был бы верным, отсюда «плавающий» баг."
+          ],
+          "caption": "`counter++` — три шага, и если чужие шаги вклиниваются между ними, одно увеличение пропадает."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Тот же counter++ под mutex",
+          "mermaid": "sequenceDiagram\n  participant G1 as Goroutine 1\n  participant M as mu\n  participant C as counter\n  participant G2 as Goroutine 2\n  G1->>M: Lock — свободен, захватила\n  G2->>M: Lock — занят, ждёт\n  G1->>C: читает 0, пишет 1\n  G1->>M: Unlock\n  M-->>G2: теперь mutex у Goroutine 2\n  G2->>C: читает 1, пишет 2\n  G2->>M: Unlock\n  Note over C: counter = 2, ничего не потеряно",
+          "steps": [
+            "Goroutine 1 вызывает `mu.Lock()` — mutex свободен, она его захватывает.",
+            "Goroutine 2 тоже вызывает `Lock()`, но mutex занят — она **ждёт**.",
+            "Goroutine 1 целиком выполняет `counter++`: читает 0, записывает 1. Никто не вклинивается.",
+            "Goroutine 1 вызывает `Unlock()`.",
+            "Mutex достаётся Goroutine 2. Всё, что записано до `Unlock()`, ей гарантированно видно (happens-before).",
+            "Goroutine 2 читает уже 1 и записывает 2.",
+            "Goroutine 2 отпускает mutex.",
+            "Итог — 2. Для одного счётчика то же даёт `atomic.AddInt64` без блокировки."
+          ],
+          "caption": "Mutex не даёт шагам read → increment → write двух goroutine перемешаться и гарантирует, что вторая увидит запись первой."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Race condition без data race: check-then-act",
+          "mermaid": "sequenceDiagram\n  participant G1 as Goroutine 1\n  participant B as balance под mu\n  participant G2 as Goroutine 2\n  Note over B: balance = 100\n  G1->>B: Lock, проверка balance ≥ 100 — да, Unlock\n  G2->>B: Lock, проверка balance ≥ 100 — да, Unlock\n  G1->>B: Lock, списывает 100, Unlock\n  G2->>B: Lock, списывает 100, Unlock\n  Note over B: balance = −100",
+          "steps": [
+            "На балансе 100. Две goroutine хотят списать по 100.",
+            "Goroutine 1 под lock проверяет: денег хватает. Lock отпущен.",
+            "Goroutine 2 под lock проверяет то же — баланс ещё не изменился, денег «хватает». Lock отпущен.",
+            "Goroutine 1 под новым lock списывает 100.",
+            "Goroutine 2 тоже списывает 100 — её проверка уже устарела.",
+            "Баланс ушёл в минус. Data race нет, а **race condition** есть. Лечится одной критической секцией на проверку и списание."
+          ],
+          "caption": "Каждый доступ под mutex, поэтому `-race` молчит, но проверка и действие в разных критических секциях — и инвариант нарушен."
+        }
+      ]
+    }
+  }
+}
