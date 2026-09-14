@@ -16,7 +16,9 @@
       "postgresql-index-not-used",
       "postgresql-explain",
       "postgresql-slow-query",
-      "sql-join"
+      "sql-join",
+      "sql-group-by",
+      "sql-window-functions"
     ],
     "05-algorithms": [
       "algo-interview-process",
@@ -485,6 +487,26 @@
       "prerequisites": [
         "system-design-approach",
         "feed-fan-out"
+      ]
+    },
+    {
+      "id": "sql-group-by",
+      "title": "GROUP BY и HAVING",
+      "domain": "Базы данных / Запросы",
+      "level": "L3",
+      "order": 280,
+      "parent_id": null,
+      "prerequisites": []
+    },
+    {
+      "id": "sql-window-functions",
+      "title": "Оконные функции",
+      "domain": "Базы данных / Запросы",
+      "level": "L4",
+      "order": 290,
+      "parent_id": null,
+      "prerequisites": [
+        "sql-group-by"
       ]
     }
   ]

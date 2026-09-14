@@ -204,6 +204,110 @@
       ],
       "definition": "Все комбинации строк двух таблиц: N × M строк. Намеренно — CROSS JOIN, по ошибке — при забытом или всегда истинном условии соединения.",
       "concept_id": "sql-join"
+    },
+    {
+      "term": "GROUP BY",
+      "aliases": [
+        "группировка"
+      ],
+      "definition": "Клауза, которая сворачивает строки в группы по значению одной или нескольких колонок; по каждой группе агрегатные функции считают одно значение.",
+      "concept_id": "sql-group-by"
+    },
+    {
+      "term": "HAVING",
+      "aliases": [],
+      "definition": "Фильтр по группам после агрегации: `HAVING SUM(amount) > 1000`. В отличие от WHERE, видит агрегаты и выполняется после GROUP BY.",
+      "concept_id": "sql-group-by"
+    },
+    {
+      "term": "агрегатная функция",
+      "aliases": [
+        "агрегат",
+        "aggregate"
+      ],
+      "definition": "Функция, сводящая множество строк группы к одному значению: COUNT, SUM, AVG, MIN, MAX. Кроме COUNT(*), все игнорируют NULL.",
+      "concept_id": "sql-group-by"
+    },
+    {
+      "term": "COUNT",
+      "aliases": [
+        "SUM",
+        "AVG",
+        "COUNT(DISTINCT)"
+      ],
+      "definition": "COUNT(*) считает все строки, COUNT(col) — только не-NULL значения, COUNT(DISTINCT col) — уникальные не-NULL. SUM/AVG считают сумму и среднее, пропуская NULL.",
+      "concept_id": "sql-group-by"
+    },
+    {
+      "term": "оконная функция",
+      "aliases": [
+        "window function",
+        "оконка"
+      ],
+      "definition": "Функция, считающая агрегат, ранг или смещение по окну строк без их схлопывания: результат добавляется колонкой к каждой строке. Задаётся через OVER.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "OVER",
+      "aliases": [
+        "OVER ()"
+      ],
+      "definition": "Клауза, задающая окно оконной функции: `OVER (PARTITION BY ... ORDER BY ...)`. Пустой `OVER ()` — окно из всех строк выборки.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "PARTITION BY",
+      "aliases": [],
+      "definition": "Часть окна, делящая строки на разделы (как GROUP BY), но без схлопывания: оконная функция считается в пределах каждого раздела.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "ROW_NUMBER",
+      "aliases": [],
+      "definition": "Оконная функция, дающая строкам раздела уникальные номера 1, 2, 3… по порядку ORDER BY. При равных значениях порядок произволен.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "RANK",
+      "aliases": [],
+      "definition": "Оконная функция ранжирования: равным значениям даёт один ранг, затем пропускает номера (1, 2, 2, 4).",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "DENSE_RANK",
+      "aliases": [],
+      "definition": "Оконная функция ранжирования: равным значениям даёт один ранг без пропусков в нумерации (1, 2, 2, 3).",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "LAG",
+      "aliases": [],
+      "definition": "Оконная функция, возвращающая значение из предыдущей строки окна по порядку ORDER BY. Используется для сравнения с предыдущим значением.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "LEAD",
+      "aliases": [],
+      "definition": "Оконная функция, возвращающая значение из следующей строки окна по порядку ORDER BY.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "CTE",
+      "aliases": [
+        "Common Table Expression",
+        "общее табличное выражение"
+      ],
+      "definition": "Именованный подзапрос через `WITH name AS (...)`, на который можно ссылаться в основном запросе. Часто используют, чтобы отфильтровать по результату оконной функции.",
+      "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "running total",
+      "aliases": [
+        "нарастающий итог",
+        "cumulative sum"
+      ],
+      "definition": "Накопительная сумма по порядку строк: `SUM(x) OVER (ORDER BY ...)`. Без ORDER BY в окне получается сумма по всему разделу, а не накопление.",
+      "concept_id": "sql-window-functions"
     }
   ]
 }

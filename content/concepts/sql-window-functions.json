@@ -1,0 +1,697 @@
+{
+  "id": "sql-window-functions",
+  "title": "Оконные функции",
+  "domain": "Базы данных / Запросы",
+  "level": "L4",
+  "tags": [
+    "sql",
+    "postgresql",
+    "window-functions",
+    "analytics"
+  ],
+  "prerequisites": [
+    "sql-group-by"
+  ],
+  "summary": "Оконные функции считают агрегат, ранг или смещение по «окну» строк, НЕ схлопывая строки — в отличие от GROUP BY. Синтаксис: функция OVER (PARTITION BY ... ORDER BY ...). PARTITION BY делит на разделы, ORDER BY задаёт порядок для ранжирования и рамки. Ранжирующие: ROW_NUMBER, RANK, DENSE_RANK; смещения: LAG, LEAD; агрегаты: SUM/AVG/COUNT OVER (нарастающий итог). Оконную функцию нельзя использовать в WHERE/HAVING той же выборки — только через подзапрос или CTE.",
+  "mental_model": {
+    "type": "table",
+    "description": "GROUP BY сворачивает группу в одну строку и теряет детали. Оконная функция считает то же самое по разделу, но оставляет каждую исходную строку и просто добавляет колонку с результатом.",
+    "elements": [
+      "GROUP BY",
+      "оконная функция"
+    ],
+    "relations": [],
+    "diagram": "GROUP BY dept:         OVER(PARTITION BY dept):\ndept | AVG            name | dept | sal | AVG\n-----+----            -----+------+-----+----\n A   | 150            Ann  |  A   | 200 | 150\n B   |  90            Bob  |  A   | 100 | 150\n(2 строки)            Eve  |  B   |  90 |  90\n                      (3 строки, детали на месте)",
+    "table": {
+      "columns": [
+        "",
+        "GROUP BY",
+        "Оконная функция"
+      ],
+      "rows": [
+        [
+          "Строки на выходе",
+          "по одной на группу",
+          "все исходные строки"
+        ],
+        [
+          "Детали строк",
+          "теряются",
+          "сохраняются"
+        ],
+        [
+          "Фильтр результата",
+          "HAVING",
+          "только подзапрос / CTE"
+        ]
+      ]
+    }
+  },
+  "problem": {
+    "question": "Нужны и агрегат, и детальные строки сразу: ранг заказа внутри клиента, доля строки в сумме группы, нарастающий итог, значение предыдущего дня. Как посчитать агрегат, не схлопывая строки?",
+    "context": "GROUP BY сворачивает группу в одну строку, поэтому детали и агрегат в одном запросе с ним несовместимы. А задачи скрининга (топ-N на группу, вторая зарплата, running total) требуют именно этого.",
+    "why_it_matters": "Оконные функции — типичная тема SQL-скрининга. Без них те же задачи решают самоджойнами и коррелированными подзапросами: длиннее, медленнее и с ошибками. А наивная попытка отфильтровать оконку прямо в WHERE роняет запрос."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "Окно задаётся через OVER",
+        "description": "После функции пишут `OVER (...)`. Пустой `OVER ()` — окно из всех строк выборки. Внутри OVER описывают, как разбить и упорядочить строки окна."
+      },
+      {
+        "order": 2,
+        "title": "PARTITION BY делит на разделы",
+        "description": "`PARTITION BY department` разбивает строки на разделы по значению колонки, как GROUP BY, но строки не схлопываются — функция считается для каждой строки в пределах её раздела. Без PARTITION BY весь результат — один раздел."
+      },
+      {
+        "order": 3,
+        "title": "ORDER BY внутри окна",
+        "description": "`ORDER BY salary DESC` задаёт порядок строк внутри раздела. Он нужен ранжирующим функциям (кто первый по зарплате) и определяет рамку для нарастающих агрегатов."
+      },
+      {
+        "order": 4,
+        "title": "Функция считается для каждой строки",
+        "description": "Результат добавляется новой колонкой к каждой исходной строке. Число строк на выходе равно числу строк на входе — оконка ничего не сворачивает."
+      },
+      {
+        "order": 5,
+        "title": "Три семейства функций",
+        "description": "Ранжирующие: ROW_NUMBER (уникальный номер), RANK (ранг с пропусками при равных), DENSE_RANK (плотный ранг). Смещения: LAG (значение предыдущей строки), LEAD (следующей). Агрегатные OVER: SUM/AVG/COUNT/MIN/MAX по окну, с ORDER BY дают нарастающий итог."
+      },
+      {
+        "order": 6,
+        "title": "Рамка окна (frame)",
+        "description": "При наличии ORDER BY агрегат по умолчанию считается от начала раздела до текущей строки — с рамкой `RANGE`, включающей все строки-ровни по значению ORDER BY. Для точного построчного нарастающего итога задают `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`."
+      },
+      {
+        "order": 7,
+        "title": "Оконку нельзя фильтровать в WHERE/HAVING",
+        "description": "Оконные функции вычисляются после WHERE, GROUP BY и HAVING, поэтому в этих клаузах их использовать нельзя. Чтобы отфильтровать по результату оконки (топ-N, ранг = 2), её оборачивают в подзапрос или CTE и фильтруют во внешнем WHERE."
+      }
+    ],
+    "key_objects": [
+      "OVER",
+      "PARTITION BY",
+      "ORDER BY (в окне)",
+      "ROW_NUMBER / RANK / DENSE_RANK",
+      "LAG / LEAD",
+      "SUM() OVER (нарастающий итог)",
+      "рамка окна (frame)"
+    ],
+    "important_distinctions": [
+      "GROUP BY схлопывает строки, оконная функция сохраняет их и добавляет колонку.",
+      "ROW_NUMBER всегда уникален в разделе; RANK даёт пропуски при равных значениях (1,2,2,4); DENSE_RANK — без пропусков (1,2,2,3).",
+      "Оконку нельзя в WHERE/HAVING той же выборки — только через подзапрос или CTE.",
+      "SUM() OVER () без ORDER BY — итог по всему разделу; с ORDER BY — нарастающий итог."
+    ]
+  },
+  "minimal_example": {
+    "language": "sql",
+    "code": "SELECT employee, department, salary,\n       RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS rnk\nFROM employees;",
+    "explanation": "Строки делятся на разделы по department, внутри каждого сортируются по убыванию зарплаты, и RANK проставляет ранг. Все строки остаются на месте — просто добавляется колонка rnk.",
+    "expected_result": "Все сотрудники с колонкой rnk: в каждом отделе 1 — самый высокооплачиваемый; при равных зарплатах ранг совпадает, следующий за ними ранг идёт с пропуском."
+  },
+  "details": [
+    {
+      "title": "PARTITION BY против GROUP BY",
+      "description": "`PARTITION BY dept` и `GROUP BY dept` одинаково делят строки на разделы, но GROUP BY возвращает по строке на раздел, а оконка — все строки раздела с добавленной колонкой. Поэтому оконка годится, когда нужны и агрегат, и детали.",
+      "importance": "critical"
+    },
+    {
+      "title": "ROW_NUMBER vs RANK vs DENSE_RANK",
+      "description": "На зарплатах 100, 90, 90, 80: ROW_NUMBER даёт 1, 2, 3, 4 (всегда уникален, порядок среди равных произволен); RANK — 1, 2, 2, 4 (равным один ранг, затем пропуск); DENSE_RANK — 1, 2, 2, 3 (без пропуска). Для «ровно N строк» берут ROW_NUMBER, для «топ-N по значению с учётом равных» — RANK/DENSE_RANK.",
+      "importance": "critical"
+    },
+    {
+      "title": "Оконку нельзя в WHERE и HAVING",
+      "description": "`WHERE ROW_NUMBER() OVER (...) <= 3` — ошибка `window functions are not allowed in WHERE`, потому что оконки считаются после WHERE/HAVING. Фильтр по результату делают через подзапрос или CTE: посчитать оконку внутри, отфильтровать снаружи.",
+      "importance": "critical"
+    },
+    {
+      "title": "LAG и LEAD",
+      "description": "`LAG(amount) OVER (ORDER BY day)` берёт значение предыдущей строки окна, `LEAD` — следующей. Удобно для «прирост ко вчера» (`amount - LAG(amount) OVER (...)`). Второй аргумент — смещение, третий — значение по умолчанию для краёв (например, 0 вместо NULL).",
+      "importance": "important"
+    },
+    {
+      "title": "Нарастающий итог и рамка окна",
+      "description": "`SUM(amount) OVER (ORDER BY day)` даёт нарастающий итог. По умолчанию рамка — `RANGE UNBOUNDED PRECEDING`, и все строки с одинаковым day попадают в итог целиком. Для строгого построчного накопления пишут `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. `SUM(amount) OVER (PARTITION BY user_id)` без ORDER BY — сумма по всему разделу, полезна для доли строки в группе.",
+      "importance": "important"
+    },
+    {
+      "title": "Порядок вычисления",
+      "description": "Оконные функции считаются после FROM/WHERE/GROUP BY/HAVING, но до ORDER BY и DISTINCT всего запроса. Поэтому по результату оконки нельзя фильтровать в той же выборке, но можно сортировать.",
+      "importance": "important"
+    },
+    {
+      "title": "Одинаковое окно и WINDOW-клауза",
+      "description": "Если несколько функций используют одно окно, его можно вынести в `WINDOW w AS (PARTITION BY ... ORDER BY ...)` и писать `RANK() OVER w`. Читаемее и меньше дублирования.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Оконная функция не меняет число строк: на выходе столько же строк, сколько на входе",
+      "why": "Функция вычисляется для каждой строки по её окну и добавляется колонкой, а не сворачивает строки."
+    },
+    {
+      "statement": "ROW_NUMBER уникален в пределах раздела; RANK и DENSE_RANK совпадают для строк с равным значением ORDER BY",
+      "why": "ROW_NUMBER просто нумерует, а RANK/DENSE_RANK отражают равенство значений."
+    },
+    {
+      "statement": "RANK может давать пропуски в нумерации, DENSE_RANK — нет",
+      "why": "После k равных строк RANK прыгает на k позиций вперёд, DENSE_RANK всегда на 1."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "sql-window-functions-fm-window-in-where",
+      "title": "Оконная функция в WHERE или HAVING",
+      "cause": "Попытка отфильтровать по оконке прямо в той же выборке: `WHERE ROW_NUMBER() OVER (...) <= 3`.",
+      "symptom": "Ошибка `window functions are not allowed in WHERE` (или в HAVING).",
+      "mechanism": "Оконки вычисляются логически после WHERE/GROUP BY/HAVING, поэтому в этих клаузах их ещё нет.",
+      "fix": "Обернуть в подзапрос или CTE: посчитать оконку внутри, а WHERE по её результату вынести во внешний запрос.",
+      "prevention": "Помнить: фильтр по оконке — всегда через подзапрос/CTE, а не напрямую."
+    },
+    {
+      "id": "sql-window-functions-fm-running-total-no-order",
+      "title": "Нарастающий итог без ORDER BY",
+      "cause": "`SUM(amount) OVER (PARTITION BY user_id)` вместо `... ORDER BY day`.",
+      "symptom": "Во всех строках раздела одинаковое число — общая сумма, а не нарастающий итог.",
+      "mechanism": "Без ORDER BY окно охватывает весь раздел целиком, накопление не строится.",
+      "fix": "Добавить ORDER BY по нужной колонке (обычно дата/время).",
+      "prevention": "Для running total всегда задавать ORDER BY, при необходимости — явную рамку ROWS."
+    },
+    {
+      "id": "sql-window-functions-fm-rank-vs-rownumber",
+      "title": "RANK вместо ROW_NUMBER для «ровно N строк»",
+      "cause": "Для «топ-3 на группу» использован RANK при наличии равных значений.",
+      "symptom": "В группе выходит больше или меньше трёх строк: равные делят ранг, следующий идёт с пропуском.",
+      "mechanism": "RANK даёт равным один ранг и пропускает номера; ROW_NUMBER всегда уникален.",
+      "fix": "Использовать ROW_NUMBER для ровно N строк; RANK/DENSE_RANK — когда равные должны попасть все.",
+      "prevention": "Сначала решить, что делать с равными значениями, потом выбирать функцию."
+    },
+    {
+      "id": "sql-window-functions-fm-missing-partition",
+      "title": "Забыт PARTITION BY",
+      "cause": "Нужен ранг внутри группы, но написано только `ORDER BY` без `PARTITION BY`.",
+      "symptom": "Нумерация сквозная по всей таблице вместо перезапуска в каждой группе.",
+      "mechanism": "Без PARTITION BY весь результат — один раздел.",
+      "fix": "Добавить `PARTITION BY <группа>` в OVER.",
+      "prevention": "Проверять, что ранжирование идёт в пределах нужного раздела."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Агрегат/ранг рядом с детальными строками — без самоджойнов и коррелированных подзапросов.",
+      "Классические задачи (топ-N на группу, running total, разница с предыдущим) решаются коротко и читаемо."
+    ],
+    "costs": [
+      "Нужен подзапрос/CTE, чтобы отфильтровать по результату оконки.",
+      "ORDER BY в окне может требовать сортировки (в плане WindowAgg поверх Sort), это память и CPU."
+    ],
+    "risks": [
+      "Забытый ORDER BY превращает нарастающий итог в общую сумму.",
+      "Неверный выбор ROW_NUMBER/RANK/DENSE_RANK тихо меняет число и состав строк в топ-N."
+    ],
+    "when_tradeoff_matters": "На больших данных сортировка для окна дорога; помогает индекс, совпадающий с PARTITION BY + ORDER BY, чтобы избежать явной сортировки."
+  },
+  "usage": {
+    "use_when": [
+      "Нужны и агрегат/ранг, и детальные строки одновременно.",
+      "Задачи: топ-N на группу, вторая зарплата, нарастающий итог, доля от суммы группы, разница с предыдущим значением."
+    ],
+    "avoid_when": [
+      "Нужна только сводка по срезу без детальных строк — достаточно GROUP BY.",
+      "Простой глобальный итог без ранжирования и порядка."
+    ],
+    "signals": [
+      "В требовании есть «внутри каждой группы», «по порядку», «предыдущий/следующий», «нарастающий».",
+      "Нужно вернуть исходные строки плюс вычисленную по ним характеристику."
+    ],
+    "production_considerations": [
+      "Индекс по (PARTITION BY, ORDER BY) убирает отдельную сортировку под WindowAgg.",
+      "Смотреть план: WindowAgg и Sort, не уходит ли сортировка на диск.",
+      "Одинаковое окно выносить в WINDOW-клаузу для читаемости."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "sql-group-by",
+      "dimension": "Схлопывание строк",
+      "difference": "GROUP BY возвращает по одной строке на группу и теряет детали. Оконная функция считает то же по разделу (PARTITION BY), но сохраняет все строки и добавляет колонку.",
+      "why_it_matters": "Это ключевой критерий выбора: нужна только сводка — GROUP BY; нужны сводка и детальные строки — оконка."
+    },
+    {
+      "concept_id": "sql-group-by",
+      "dimension": "Фильтрация результата",
+      "difference": "Результат GROUP BY фильтруют HAVING прямо в запросе. Оконку в WHERE/HAVING использовать нельзя — фильтр по её результату выносят в подзапрос или CTE.",
+      "why_it_matters": "Поэтому «топ-N на группу» на оконках всегда двухуровневый: посчитать ранг внутри, отфильтровать снаружи."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "sql-window-functions-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое оконные функции и чем они отличаются от GROUP BY?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Оконные функции считают агрегат, ранг или смещение по окну строк, но не схлопывают строки: результат добавляется колонкой к каждой исходной строке. GROUP BY же сворачивает группу в одну строку и теряет детали. Оконку задают через `OVER (PARTITION BY ... ORDER BY ...)`.",
+      "key_points": [
+        "агрегат/ранг по окну строк",
+        "строки НЕ схлопываются (в отличие от GROUP BY)",
+        "результат — новая колонка",
+        "синтаксис OVER (...)"
+      ],
+      "common_mistakes": [
+        "Считать оконку просто синонимом GROUP BY."
+      ],
+      "hints": [],
+      "follow_up": "Когда именно оконка нужна, а GROUP BY нет?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "window",
+        "recall"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-02",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Как выглядит синтаксис оконной функции? Что делают PARTITION BY и ORDER BY внутри OVER?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "`функция OVER (PARTITION BY ... ORDER BY ...)`. PARTITION BY делит строки на разделы (как GROUP BY, но без схлопывания), функция считается в пределах раздела. ORDER BY задаёт порядок строк в разделе — он нужен для ранжирования и для рамки нарастающих агрегатов. Оба необязательны: пустой `OVER ()` — окно из всех строк.",
+      "key_points": [
+        "функция OVER (PARTITION BY ... ORDER BY ...)",
+        "PARTITION BY — разделы без схлопывания",
+        "ORDER BY — порядок в разделе",
+        "OVER () — всё как один раздел"
+      ],
+      "common_mistakes": [
+        "Думать, что ORDER BY в окне — это ORDER BY всего запроса."
+      ],
+      "hints": [],
+      "follow_up": "Что будет, если PARTITION BY не указать?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "window",
+        "syntax"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "В чём разница ROW_NUMBER, RANK и DENSE_RANK на одинаковых значениях?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "На зарплатах 100, 90, 90, 80: ROW_NUMBER = 1, 2, 3, 4 (всегда уникален, порядок среди равных произволен). RANK = 1, 2, 2, 4 (равным один ранг, дальше пропуск). DENSE_RANK = 1, 2, 2, 3 (равным один ранг, без пропуска). Для «ровно N строк» берут ROW_NUMBER, для «топ по значению с учётом равных» — RANK или DENSE_RANK.",
+      "key_points": [
+        "ROW_NUMBER: 1,2,3,4 — уникален",
+        "RANK: 1,2,2,4 — пропуски",
+        "DENSE_RANK: 1,2,2,3 — без пропусков",
+        "выбор зависит от обработки равных"
+      ],
+      "common_mistakes": [
+        "Путать RANK и DENSE_RANK.",
+        "Считать порядок ROW_NUMBER среди равных детерминированным без доп. ключа сортировки."
+      ],
+      "hints": [
+        "Что происходит с двумя одинаковыми зарплатами в каждой функции?"
+      ],
+      "follow_up": "Какую из них взять для «второй по величине зарплаты»?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "window",
+        "rank"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-04",
+      "type": "explain",
+      "level": "L2",
+      "question": "Что делают LAG и LEAD? Как посчитать нарастающий итог оконной функцией?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "LAG(col) OVER (ORDER BY ...) берёт значение col из предыдущей строки окна, LEAD — из следующей. Так считают «прирост ко вчера»: `amount - LAG(amount) OVER (ORDER BY day)`. Нарастающий итог — `SUM(amount) OVER (ORDER BY day)`: с ORDER BY окно накапливает строки от начала до текущей. Без ORDER BY SUM OVER даёт общую сумму раздела, а не накопление.",
+      "key_points": [
+        "LAG — предыдущая строка, LEAD — следующая",
+        "разница с предыдущим через LAG",
+        "SUM() OVER (ORDER BY ...) — нарастающий итог",
+        "без ORDER BY — сумма всего раздела"
+      ],
+      "common_mistakes": [
+        "Ждать нарастающий итог без ORDER BY."
+      ],
+      "hints": [],
+      "follow_up": "Как задать 0 вместо NULL для самой первой строки в LAG?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "window",
+        "lag",
+        "running-total"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-05",
+      "type": "predict",
+      "level": "L3",
+      "question": "Что вернут колонки rn, rnk и drnk для каждой строки?",
+      "context": "Зарплаты сотрудников: 100, 90, 90, 80.",
+      "code": "SELECT salary,\n       ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn,\n       RANK()       OVER (ORDER BY salary DESC) AS rnk,\n       DENSE_RANK() OVER (ORDER BY salary DESC) AS drnk\nFROM employees;",
+      "code_language": "sql",
+      "expected_answer": "100 → rn 1, rnk 1, drnk 1.\n90 → rn 2, rnk 2, drnk 2.\n90 → rn 3, rnk 2, drnk 2.\n80 → rn 4, rnk 4, drnk 3.\nROW_NUMBER всегда уникален; RANK даёт двум девяностым ранг 2 и прыгает на 4; DENSE_RANK — ранг 2 и затем 3 без пропуска.",
+      "key_points": [
+        "ROW_NUMBER: 1,2,3,4",
+        "RANK: 1,2,2,4",
+        "DENSE_RANK: 1,2,2,3",
+        "равные значения → одинаковый RANK/DENSE_RANK"
+      ],
+      "common_mistakes": [
+        "Дать RANK значения 1,2,2,3 (это DENSE_RANK)."
+      ],
+      "hints": [
+        "После двух одинаковых зарплат какой номер у следующей?"
+      ],
+      "follow_up": "Какой из трёх выбрать для «ровно 3 строки на отдел»?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "window",
+        "rank",
+        "predict"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-06",
+      "type": "design",
+      "level": "L3",
+      "question": "Напишите запрос: найдите вторую по величине зарплату (вторую РАЗНУЮ величину, с учётом дубликатов).",
+      "context": "Таблица employees(id, salary).",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Через DENSE_RANK (чтобы одинаковые зарплаты считались одной величиной):\n```sql\nSELECT DISTINCT salary\nFROM (\n  SELECT salary,\n         DENSE_RANK() OVER (ORDER BY salary DESC) AS drnk\n  FROM employees\n) t\nWHERE drnk = 2;\n```\nОконку нельзя фильтровать в WHERE напрямую, поэтому DENSE_RANK считается в подзапросе, а WHERE drnk = 2 — снаружи. DENSE_RANK, а не RANK, чтобы «вторая величина» не пропала из-за дубликатов первой.",
+      "key_points": [
+        "DENSE_RANK для «второй РАЗНОЙ величины»",
+        "оконка в подзапросе, фильтр снаружи",
+        "WHERE drnk = 2",
+        "не RANK — иначе при дублях первой второй ранг пропадёт"
+      ],
+      "common_mistakes": [
+        "`WHERE DENSE_RANK() ... = 2` напрямую — ошибка.",
+        "Взять ROW_NUMBER — тогда «вторая» окажется дубликатом первой зарплаты."
+      ],
+      "hints": [
+        "Что выбрать, если максимальная зарплата встречается дважды?"
+      ],
+      "follow_up": "Как обобщить до N-й по величине?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "window",
+        "rank",
+        "design"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-07",
+      "type": "debug",
+      "level": "L4",
+      "question": "Запрос падает. Почему и как переписать?",
+      "context": "Хотят оставить трёх самых высокооплачиваемых сотрудников.",
+      "code": "SELECT name, salary\nFROM employees\nWHERE RANK() OVER (ORDER BY salary DESC) <= 3;",
+      "code_language": "sql",
+      "expected_answer": "Ошибка `window functions are not allowed in WHERE`: оконки вычисляются после WHERE, поэтому фильтровать по ним в WHERE нельзя. Нужно обернуть в подзапрос или CTE и фильтровать снаружи:\n```sql\nSELECT name, salary\nFROM (\n  SELECT name, salary,\n         RANK() OVER (ORDER BY salary DESC) AS rnk\n  FROM employees\n) t\nWHERE rnk <= 3;\n```",
+      "key_points": [
+        "window functions are not allowed in WHERE",
+        "оконка считается после WHERE",
+        "обернуть в подзапрос/CTE",
+        "фильтр rnk <= 3 снаружи"
+      ],
+      "common_mistakes": [
+        "Переносить оконку в HAVING — там та же ошибка."
+      ],
+      "hints": [
+        "На каком шаге считается оконная функция относительно WHERE?"
+      ],
+      "follow_up": "Чем ROW_NUMBER здесь отличается от RANK при равных зарплатах?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "window",
+        "debug"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-08",
+      "type": "design",
+      "level": "L4",
+      "question": "Напишите запрос: топ-3 самых дорогих товара в каждой категории.",
+      "context": "Таблица products(id, name, category, price).",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "ROW_NUMBER с PARTITION BY category, отбор во внешнем запросе:\n```sql\nSELECT category, name, price\nFROM (\n  SELECT category, name, price,\n         ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC) AS rn\n  FROM products\n) t\nWHERE rn <= 3\nORDER BY category, rn;\n```\nPARTITION BY category перезапускает нумерацию в каждой категории, ROW_NUMBER даёт ровно 3 строки на категорию. Если при равной цене нужно вернуть всех претендентов на 3-е место — RANK/DENSE_RANK вместо ROW_NUMBER.",
+      "key_points": [
+        "ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC)",
+        "фильтр rn <= 3 в подзапросе/внешнем WHERE",
+        "PARTITION BY перезапускает нумерацию в категории",
+        "ROW_NUMBER для ровно N, RANK — если нужны все равные"
+      ],
+      "common_mistakes": [
+        "Фильтровать rn <= 3 прямо в WHERE того же уровня.",
+        "Забыть PARTITION BY — получится топ-3 по всей таблице."
+      ],
+      "hints": [],
+      "follow_up": "Что изменится при равных ценах на границе топ-3?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "window",
+        "top-n",
+        "design"
+      ]
+    },
+    {
+      "id": "sql-window-functions-q-09",
+      "type": "decision",
+      "level": "L6",
+      "question": "ROW_NUMBER, RANK или DENSE_RANK — как выбрать? Приведите случай, где они дают разный результат.",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Критерий — как обходиться с равными значениями. ROW_NUMBER: нужен ровно один представитель / ровно N строк, равные различаются произвольно (или по доп. ключу сортировки) — пагинация, дедупликация, топ-N ровно. RANK: нужен спортивный ранг с пропусками — два первых места, потом третье. DENSE_RANK: нужен плотный ранг без пропусков — «вторая по величине зарплата», уровни. Пример на 100, 90, 90, 80: ROW_NUMBER 1,2,3,4; RANK 1,2,2,4; DENSE_RANK 1,2,2,3. Для «второй зарплаты» через ROW_NUMBER легко вернуть дубль максимума, поэтому берут DENSE_RANK.",
+      "key_points": [
+        "критерий — обработка равных значений",
+        "ROW_NUMBER — ровно N / уникальность",
+        "RANK — ранг с пропусками",
+        "DENSE_RANK — плотный ранг",
+        "пример 100,90,90,80 даёт разные тройки"
+      ],
+      "common_mistakes": [
+        "Считать их взаимозаменяемыми при равных значениях."
+      ],
+      "hints": [],
+      "follow_up": "Как сделать ROW_NUMBER детерминированным при равных значениях?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "window",
+        "rank",
+        "decision"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "sql-window-functions-we-01",
+      "title": "Топ-N на группу без потери деталей",
+      "problem": "Нужны три самых дорогих товара в каждой категории с их ценой.",
+      "context": "Таблица products(id, name, category, price). Нельзя фильтровать оконку в WHERE напрямую.",
+      "solution": {
+        "steps": [
+          "Внутри группы нужен порядковый номер по цене — берём ROW_NUMBER с PARTITION BY category ORDER BY price DESC.",
+          "Оконку нельзя фильтровать в WHERE той же выборки — считаем её в подзапросе (или CTE).",
+          "Во внешнем запросе оставляем строки с rn <= 3.",
+          "Если при равной цене нужны все претенденты на место — заменить ROW_NUMBER на RANK/DENSE_RANK."
+        ],
+        "code": "WITH ranked AS (\n  SELECT category, name, price,\n         ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC) AS rn\n  FROM products\n)\nSELECT category, name, price\nFROM ranked\nWHERE rn <= 3\nORDER BY category, rn;"
+      },
+      "why_it_works": "PARTITION BY category перезапускает нумерацию в каждой категории, ROW_NUMBER задаёт порядок по цене, а фильтр rn <= 3 в внешнем запросе обходит запрет на оконку в WHERE.",
+      "alternatives": [
+        "`LATERAL` подзапрос с LIMIT 3 на категорию — иногда быстрее при индексе (category, price DESC).",
+        "DENSE_RANK, если нужны все товары с ценой топ-3."
+      ],
+      "tradeoffs": [
+        "Сортировка внутри окна стоит CPU и памяти; индекс (category, price DESC) её убирает."
+      ],
+      "common_mistakes": [
+        "Фильтровать rn <= 3 в том же SELECT, где считается ROW_NUMBER.",
+        "Забыть PARTITION BY и получить топ-3 по всей таблице."
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "sql-window-functions-pr-01",
+      "type": "code",
+      "title": "Нарастающий итог по дням",
+      "task": "Таблица orders(id, amount, created_at). Напиши запрос: по каждому заказу показать дату, сумму заказа и нарастающий итог выручки по возрастанию даты.",
+      "constraints": [
+        "Строки заказов должны остаться (не схлопывать)."
+      ],
+      "expected_output": "Строки: created_at, amount, running_total — нарастающая сумма по дате.",
+      "solution": {
+        "description": "SUM(amount) OVER (ORDER BY created_at) даёт нарастающий итог. Для строго построчного накопления можно указать явную рамку ROWS.",
+        "code": "SELECT created_at,\n       amount,\n       SUM(amount) OVER (\n         ORDER BY created_at\n         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n       ) AS running_total\nFROM orders\nORDER BY created_at;"
+      },
+      "evaluation_points": [
+        "SUM() OVER (ORDER BY created_at) — накопление",
+        "ORDER BY в окне обязателен",
+        "строки не схлопнуты",
+        "явная рамка ROWS для построчного итога"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "sql-window-functions-pr-02",
+      "type": "code",
+      "title": "Прирост выручки ко вчера",
+      "task": "Таблица daily(day date, revenue numeric) с одной строкой на день. Напиши запрос: по каждому дню показать выручку, выручку предыдущего дня и абсолютный прирост.",
+      "constraints": [
+        "Для первого дня предыдущего значения нет."
+      ],
+      "expected_output": "Строки: day, revenue, prev_revenue, growth.",
+      "solution": {
+        "description": "LAG(revenue) OVER (ORDER BY day) — выручка предыдущего дня; прирост — разность. Для первого дня LAG вернёт NULL (можно подставить 0 третьим аргументом).",
+        "code": "SELECT day,\n       revenue,\n       LAG(revenue) OVER (ORDER BY day)            AS prev_revenue,\n       revenue - LAG(revenue) OVER (ORDER BY day)  AS growth\nFROM daily\nORDER BY day;"
+      },
+      "evaluation_points": [
+        "LAG(revenue) OVER (ORDER BY day)",
+        "прирост через разность с LAG",
+        "понимание NULL в первой строке",
+        "строки сохранены"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "sql-window-functions-pr-03",
+      "type": "code",
+      "title": "Доля заказа в сумме клиента",
+      "task": "Таблица orders(id, user_id, amount). Напиши запрос: по каждому заказу показать его сумму и долю (в процентах) в общей сумме заказов этого клиента.",
+      "constraints": [
+        "Все заказы должны остаться в выводе."
+      ],
+      "expected_output": "Строки: id, user_id, amount, share_pct.",
+      "solution": {
+        "description": "SUM(amount) OVER (PARTITION BY user_id) без ORDER BY — общая сумма клиента; делим сумму заказа на неё. Оконка сохраняет все строки, поэтому доля считается прямо рядом с заказом.",
+        "code": "SELECT id,\n       user_id,\n       amount,\n       round(100.0 * amount\n             / SUM(amount) OVER (PARTITION BY user_id), 2) AS share_pct\nFROM orders;"
+      },
+      "evaluation_points": [
+        "SUM() OVER (PARTITION BY user_id) без ORDER BY — итог раздела",
+        "деление суммы заказа на итог клиента",
+        "строки не схлопнуты",
+        "приведение к процентам"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "sql-group-by",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "sql-join",
+      "relation": "related"
+    },
+    {
+      "concept_id": "postgresql-explain",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "GROUP BY уже освоен: он сворачивает строки в сводку. Но на скрининге просят другое — «топ-3 товара в каждой категории», «вторая зарплата», «нарастающий итог». Здесь нужны и агрегат, и сами строки. GROUP BY тут пасует.\n\nСоберём оконные функции по шагам.",
+    "beats": [
+      {
+        "problem": "Нужно к каждому сотруднику приписать среднюю зарплату его отдела — и оставить самих сотрудников. GROUP BY схлопнул бы строки. **Как посчитать агрегат, не теряя строки?**",
+        "solution": "Добавить к функции слово OVER: `AVG(salary) OVER (PARTITION BY department)`. PARTITION BY делит строки на разделы по отделу — как GROUP BY, но строки остаются, а рядом появляется колонка со средним по отделу.",
+        "term": "оконная функция, OVER, PARTITION BY",
+        "analogy": "Не сворачивать стопку чеков в итог, а на каждом чеке дописать «средний чек по этому клиенту»."
+      },
+      {
+        "problem": "Теперь нужен ранг: кто первый по зарплате в отделе. Средним это не выразить. **Как пронумеровать строки внутри раздела по порядку?**",
+        "solution": "Добавить в окно ORDER BY: `ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC)`. ORDER BY задаёт порядок внутри раздела, ROW_NUMBER раздаёт номера 1, 2, 3…",
+        "term": "ROW_NUMBER",
+        "analogy": "Выстроить сотрудников отдела по зарплате и раздать номерки с первого."
+      },
+      {
+        "problem": "Две зарплаты равны, а ROW_NUMBER дал им разные номера — несправедливо для «ранга». **Как дать равным одинаковый ранг?**",
+        "solution": "RANK и DENSE_RANK дают равным один ранг. Разница в том, что дальше: после двух вторых мест RANK прыгает на 4-е (с пропуском), а DENSE_RANK идёт на 3-е (без пропуска). На 100, 90, 90, 80: RANK — 1,2,2,4; DENSE_RANK — 1,2,2,3.",
+        "term": "RANK, DENSE_RANK",
+        "analogy": "Спорт: два серебра — и следующий сразу четвёртый (RANK). Или уровни зарплат: после «второго уровня» идёт «третий» (DENSE_RANK)."
+      },
+      {
+        "problem": "Классика скрининга: «вторая по величине зарплата». Пишу `WHERE DENSE_RANK() OVER (...) = 2` — и запрос падает. **Почему нельзя фильтровать оконку в WHERE?**",
+        "solution": "Оконки считаются после WHERE — на момент WHERE ранга ещё нет, поэтому `window functions are not allowed in WHERE`. Оконку кладут в подзапрос или CTE, а фильтр `WHERE drnk = 2` вешают на внешний запрос.",
+        "term": "подзапрос / CTE",
+        "analogy": "Сначала расставь всем номерки (внутренний запрос), и только потом отбирай по номерку (внешний)."
+      },
+      {
+        "problem": "«Топ-3 товара в каждой категории». **Какой функцией и где фильтровать?**",
+        "solution": "ROW_NUMBER с `PARTITION BY category ORDER BY price DESC` внутри подзапроса, снаружи `WHERE rn <= 3`. ROW_NUMBER — потому что нужно ровно три строки; если при равной цене нужны все претенденты, берут RANK/DENSE_RANK.",
+        "term": null,
+        "analogy": "В каждой категории построить товары по цене и взять первые три с полки."
+      },
+      {
+        "problem": "Нужен нарастающий итог выручки по дням. `SUM(amount) OVER (PARTITION BY ...)` даёт одну и ту же общую сумму во всех строках. **Как накапливать по мере движения по датам?**",
+        "solution": "Добавить в окно ORDER BY: `SUM(amount) OVER (ORDER BY day)`. С ORDER BY окно растёт от начала до текущей строки — получается нарастающий итог. А `LAG(amount) OVER (ORDER BY day)` даёт значение предыдущей строки, чтобы посчитать прирост ко вчера.",
+        "term": "running total (нарастающий итог), LAG / LEAD",
+        "analogy": "Идёшь по выписке сверху вниз и ведёшь бегущий остаток."
+      },
+      {
+        "problem": "**Чем оконки заплатили за удобство?**",
+        "solution": "Во-первых, чтобы отобрать по результату оконки, всегда нужен второй уровень — подзапрос или CTE. Во-вторых, ORDER BY в окне часто требует сортировки: на больших данных это память и CPU. Спасает индекс, совпадающий с PARTITION BY + ORDER BY, — тогда сортировка не нужна.",
+        "term": null,
+        "analogy": "Раскладка по порядку стоит времени; если полка уже отсортирована (индекс), раскладывать не приходится."
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Оконные функции считают агрегат, ранг или смещение по окну строк, но не схлопывают строки — в отличие от GROUP BY. Синтаксис: функция OVER (PARTITION BY ... ORDER BY ...). ROW_NUMBER даёт уникальные номера, RANK — ранг с пропусками, DENSE_RANK — без пропусков. LAG/LEAD берут соседние значения, SUM() OVER (ORDER BY ...) — нарастающий итог. Оконку нельзя использовать в WHERE/HAVING — для фильтра (топ-N, вторая зарплата) её оборачивают в подзапрос или CTE."
+  },
+  "short_answer": {
+    "junior": "Оконные функции считают что-то по группе строк (ранг, сумму, среднее, предыдущее значение), но, в отличие от GROUP BY, не схлопывают строки — результат добавляется отдельной колонкой к каждой строке. Пишутся через `OVER (PARTITION BY ... ORDER BY ...)`.",
+    "middle": "Оконная функция считает агрегат/ранг/смещение по окну и сохраняет все строки. Окно задаётся в `OVER`: PARTITION BY делит на разделы (как GROUP BY, но без схлопывания), ORDER BY задаёт порядок для ранжирования и рамки.\n\nОсновные функции: ROW_NUMBER (уникальный номер), RANK (ранг с пропусками при равных, 1-2-2-4), DENSE_RANK (без пропусков, 1-2-2-3), LAG/LEAD (соседние строки), SUM/AVG/COUNT OVER (в т.ч. нарастающий итог с ORDER BY).\n\nВажно: оконку нельзя использовать в WHERE или HAVING той же выборки — она считается позже. Чтобы отфильтровать по её результату (топ-N на группу, вторая зарплата), оборачивают в подзапрос или CTE.",
+    "senior": "Всё из middle, плюс:\n- Классические задачи: «топ-N на группу» — ROW_NUMBER с PARTITION BY в подзапросе + внешний WHERE rn <= N; «вторая по величине зарплата» — DENSE_RANK = 2 (не ROW_NUMBER, иначе вернётся дубль максимума); running total — SUM() OVER (ORDER BY ...); «прирост ко вчера» — LAG.\n- Рамка окна: при ORDER BY агрегат по умолчанию считается с рамкой RANGE (все строки-ровни попадают целиком); для строгого построчного накопления пишут ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.\n- SUM() OVER () без ORDER BY — итог по всему разделу (доля строки в группе); с ORDER BY — накопление.\n- Порядок вычисления: оконки считаются после WHERE/GROUP BY/HAVING, но до ORDER BY и DISTINCT.\n- Производительность: ORDER BY в окне даёт WindowAgg поверх Sort; индекс (PARTITION BY, ORDER BY) убирает сортировку. Одинаковое окно выносят в WINDOW-клаузу.\n- Выбор ROW_NUMBER/RANK/DENSE_RANK — по тому, что делать с равными значениями.",
+    "visuals": {
+      "middle": [
+        {
+          "title": "GROUP BY схлопывает, оконка сохраняет строки",
+          "mermaid": "flowchart TD\n  D[\"5 строк сотрудников\"] --> GB[\"GROUP BY dept<br/>+ агрегат\"]\n  D --> WF[\"AVG(...) OVER<br/>PARTITION BY dept\"]\n  GB --> GBr[\"2 строки<br/>по одной на отдел<br/>детали потеряны\"]\n  WF --> WFr[\"5 строк<br/>+ колонка со средним<br/>детали на месте\"]",
+          "caption": "PARTITION BY делит так же, как GROUP BY, но строки остаются, а результат добавляется колонкой."
+        },
+        {
+          "title": "Топ-N на группу: оконку фильтруют через подзапрос",
+          "mermaid": "flowchart LR\n  A[\"оконку нельзя<br/>в WHERE\"] --> B[\"подзапрос / CTE:<br/>ROW_NUMBER() OVER<br/>(PARTITION BY g ORDER BY x)\"]\n  B --> C[\"внешний WHERE rn <= N\"]\n  C --> R[\"по N строк на группу\"]",
+          "caption": "Оконка считается в подзапросе, а фильтр по её результату — во внешнем запросе."
+        }
+      ],
+      "senior": [
+        {
+          "title": "ROW_NUMBER vs RANK vs DENSE_RANK на равных значениях",
+          "mermaid": "flowchart TD\n  V[\"зарплаты по убыванию:<br/>100, 90, 90, 80\"]\n  V --> RN[\"ROW_NUMBER<br/>1, 2, 3, 4\"]\n  V --> RK[\"RANK<br/>1, 2, 2, 4\"]\n  V --> DR[\"DENSE_RANK<br/>1, 2, 2, 3\"]",
+          "caption": "ROW_NUMBER всегда уникален; RANK даёт равным один ранг и пропуск; DENSE_RANK — без пропуска."
+        }
+      ]
+    }
+  }
+}

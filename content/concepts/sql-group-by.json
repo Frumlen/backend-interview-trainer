@@ -1,0 +1,691 @@
+{
+  "id": "sql-group-by",
+  "title": "GROUP BY и HAVING",
+  "domain": "Базы данных / Запросы",
+  "level": "L3",
+  "tags": [
+    "sql",
+    "postgresql",
+    "aggregation",
+    "group-by"
+  ],
+  "prerequisites": [],
+  "summary": "GROUP BY сворачивает строки в группы по значению одной или нескольких колонок, а агрегатные функции (COUNT, SUM, AVG, MIN, MAX) считают по каждой группе одно число. В SELECT можно указывать только колонки из GROUP BY или агрегаты. WHERE фильтрует строки до группировки, HAVING — группы после агрегации. Порядок выполнения: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT.",
+  "mental_model": {
+    "type": "data_flow",
+    "description": "Запрос — это конвейер. Сначала берутся и фильтруются строки, затем они сворачиваются в группы, по группам считаются агрегаты, группы фильтруются HAVING и только потом формируется вывод.",
+    "elements": [
+      "FROM",
+      "WHERE",
+      "GROUP BY",
+      "HAVING",
+      "SELECT",
+      "ORDER BY / LIMIT"
+    ],
+    "relations": [
+      "FROM -> WHERE: строки таблиц",
+      "WHERE -> GROUP BY: строки после фильтра",
+      "GROUP BY -> HAVING: группы (по одной строке на группу)",
+      "HAVING -> SELECT: группы после фильтра по агрегатам",
+      "SELECT -> ORDER BY / LIMIT: колонки и агрегаты"
+    ],
+    "diagram": "user_id | amount     GROUP BY user_id\n--------+-------     --------------->\n   1    |  500        user_id | SUM\n   1    |  300        --------+-----\n   2    |  700           1    | 800\n                          2    | 700",
+    "table": {
+      "columns": [
+        "",
+        "WHERE",
+        "HAVING"
+      ],
+      "rows": [
+        [
+          "Когда",
+          "до группировки",
+          "после группировки"
+        ],
+        [
+          "Что фильтрует",
+          "отдельные строки",
+          "целые группы"
+        ],
+        [
+          "Можно агрегат",
+          "нет",
+          "да (SUM, COUNT...)"
+        ]
+      ]
+    }
+  },
+  "problem": {
+    "question": "В таблице заказы лежат построчно, а отчёту нужны итоги: сколько заказов у каждого клиента и на какую сумму. Как из множества строк получить сводку по группам?",
+    "context": "Данные хранятся детально — одна строка на факт. Аналитике же нужны агрегаты: счётчики, суммы, средние по срезам.",
+    "why_it_matters": "Без группировки итоги считают в приложении, перекачивая все строки. GROUP BY делает это в базе; ошибки в нём (агрегат в WHERE, забытая колонка в GROUP BY, COUNT не той колонки) либо роняют запрос, либо тихо дают неверные цифры."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "GROUP BY делит строки на группы",
+        "description": "Строки с одинаковым значением колонок из GROUP BY попадают в одну группу. Число групп равно числу уникальных комбинаций этих колонок."
+      },
+      {
+        "order": 2,
+        "title": "Агрегат считает по каждой группе одно значение",
+        "description": "COUNT, SUM, AVG, MIN, MAX применяются к строкам внутри группы и дают по группе одно число. На выходе — одна строка на группу."
+      },
+      {
+        "order": 3,
+        "title": "Правило SELECT",
+        "description": "В списке SELECT при GROUP BY можно указывать только колонки, входящие в GROUP BY, или выражения под агрегатом. Иначе для группы неоднозначно, какое из многих значений колонки показать, и PostgreSQL выдаёт ошибку `column ... must appear in the GROUP BY clause`."
+      },
+      {
+        "order": 4,
+        "title": "WHERE до группировки, HAVING после",
+        "description": "WHERE отбирает отдельные строки ещё до GROUP BY и не видит агрегатов. HAVING фильтрует уже готовые группы по значениям агрегатов (`HAVING SUM(amount) > 1000`). Агрегат в WHERE — ошибка `aggregate functions are not allowed in WHERE`."
+      },
+      {
+        "order": 5,
+        "title": "Порядок выполнения",
+        "description": "Логический порядок: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. Поэтому алиас из SELECT не виден в WHERE, но виден в ORDER BY; а фильтр по строке дешевле поставить в WHERE, чтобы в группировку попало меньше данных."
+      },
+      {
+        "order": 6,
+        "title": "COUNT и NULL",
+        "description": "`COUNT(*)` считает все строки группы. `COUNT(col)` — только строки, где col не NULL. `COUNT(DISTINCT col)` — число уникальных не-NULL значений. SUM/AVG/MIN/MAX тоже игнорируют NULL, а AVG делит сумму на число не-NULL значений."
+      }
+    ],
+    "key_objects": [
+      "GROUP BY",
+      "агрегатная функция (COUNT, SUM, AVG, MIN, MAX)",
+      "HAVING",
+      "WHERE",
+      "COUNT(DISTINCT)"
+    ],
+    "important_distinctions": [
+      "WHERE фильтрует строки до группировки и не видит агрегатов; HAVING фильтрует группы после агрегации.",
+      "COUNT(*) считает все строки, COUNT(col) — только где col не NULL, COUNT(DISTINCT col) — уникальные не-NULL значения.",
+      "Колонка в SELECT должна быть либо в GROUP BY, либо под агрегатом — иначе значение для группы неоднозначно.",
+      "GROUP BY по нескольким колонкам группирует по их комбинации, а не по каждой отдельно."
+    ]
+  },
+  "minimal_example": {
+    "language": "sql",
+    "code": "SELECT user_id, COUNT(*) AS orders_count, SUM(amount) AS total\nFROM orders\nGROUP BY user_id\nHAVING SUM(amount) > 1000\nORDER BY total DESC;",
+    "explanation": "Строки orders сворачиваются в группы по user_id. Для каждой группы считаются число заказов и сумма. HAVING оставляет только клиентов с суммой больше 1000, ORDER BY сортирует по этой сумме.",
+    "expected_result": "По одной строке на клиента с суммой заказов > 1000, от большей суммы к меньшей."
+  },
+  "details": [
+    {
+      "title": "Правило SELECT: колонка из GROUP BY или агрегат",
+      "description": "`SELECT user_id, status, SUM(amount) FROM orders GROUP BY user_id` не выполнится: `status` не в GROUP BY и не под агрегатом. Для группы по user_id может быть много разных status, и база не знает, какой показать. Решение — добавить status в GROUP BY (тогда группировка идёт по паре user_id+status) либо обернуть в агрегат (`MAX(status)`), либо убрать колонку.",
+      "importance": "critical"
+    },
+    {
+      "title": "WHERE против HAVING",
+      "description": "Обычные фильтры по строкам (`status = 'paid'`, `created_at >= ...`) ставят в WHERE — до группировки, чтобы в группы попало меньше данных. Фильтр по агрегату (`SUM(amount) > 1000`, `COUNT(*) >= 10`) — только в HAVING, потому что во время WHERE агрегатов ещё нет.",
+      "importance": "critical"
+    },
+    {
+      "title": "COUNT(*) против COUNT(col) против COUNT(DISTINCT col)",
+      "description": "`COUNT(*)` — все строки. `COUNT(col)` пропускает NULL: для товара без оценок COUNT(rating) вернёт 0, хотя строки есть. `COUNT(DISTINCT user_id)` считает разных пользователей, а не число строк, — иначе повторные покупки задваивают счётчик.",
+      "importance": "important"
+    },
+    {
+      "title": "NULL в агрегатах",
+      "description": "SUM, AVG, MIN, MAX, COUNT(col) игнорируют NULL. AVG(rating) делит сумму на число НЕ-NULL оценок, а не на общее число строк, — это часто путают. SUM по группе без единого не-NULL значения вернёт NULL, а не 0.",
+      "importance": "important"
+    },
+    {
+      "title": "GROUP BY по нескольким колонкам",
+      "description": "`GROUP BY user_id, status` создаёт группу на каждую уникальную пару. Так строят срезы «сколько заказов у клиента в каждом статусе». Порядок колонок в GROUP BY на состав групп не влияет.",
+      "importance": "important"
+    },
+    {
+      "title": "GROUP BY по выражению, номеру и алиасу",
+      "description": "Можно группировать по выражению (`GROUP BY created_at::date`) или по номеру позиции в SELECT (`GROUP BY 1`). PostgreSQL допускает и GROUP BY по алиасу из SELECT. Но алиас из SELECT нельзя использовать в WHERE — WHERE выполняется раньше SELECT.",
+      "importance": "secondary"
+    },
+    {
+      "title": "Функциональная зависимость от первичного ключа",
+      "description": "Если группировать по первичному ключу таблицы (`GROUP BY u.id`), PostgreSQL разрешает выбирать и другие её колонки (`u.name`) без включения их в GROUP BY: они однозначно определяются ключом. Для переносимости часто всё равно перечисляют все не-агрегатные колонки.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "После GROUP BY выходит по одной строке на каждую уникальную комбинацию колонок группировки",
+      "why": "Группа — это все строки с одинаковыми значениями колонок GROUP BY, свёрнутые в одну строку с агрегатами."
+    },
+    {
+      "statement": "Всякая колонка в SELECT при GROUP BY либо входит в GROUP BY, либо стоит под агрегатом (либо функционально зависит от группы)",
+      "why": "Иначе для группы значение колонки неоднозначно и запрос не выполняется."
+    },
+    {
+      "statement": "COUNT(*) >= COUNT(col) >= COUNT(DISTINCT col)",
+      "why": "COUNT(*) считает все строки, COUNT(col) отбрасывает NULL, COUNT(DISTINCT) вдобавок схлопывает повторы."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "sql-group-by-fm-agg-in-where",
+      "title": "Агрегат в WHERE",
+      "cause": "Фильтр по агрегату (`WHERE SUM(amount) > 1000`) поставлен в WHERE.",
+      "symptom": "Ошибка `aggregate functions are not allowed in WHERE`.",
+      "mechanism": "WHERE выполняется до GROUP BY, когда агрегатов ещё не существует.",
+      "fix": "Перенести условие в HAVING: `HAVING SUM(amount) > 1000`.",
+      "prevention": "Помнить порядок: WHERE — по строкам до группировки, HAVING — по агрегатам после."
+    },
+    {
+      "id": "sql-group-by-fm-missing-column",
+      "title": "Колонка не в GROUP BY и не в агрегате",
+      "cause": "В SELECT есть колонка, которой нет ни в GROUP BY, ни под агрегатом.",
+      "symptom": "Ошибка `column \"...\" must appear in the GROUP BY clause or be used in an aggregate function`.",
+      "mechanism": "Для группы такая колонка может иметь много значений — база не знает, какое показать.",
+      "fix": "Добавить колонку в GROUP BY, обернуть её в агрегат или убрать из SELECT.",
+      "prevention": "Проверять, что каждый не-агрегатный столбец SELECT есть в GROUP BY."
+    },
+    {
+      "id": "sql-group-by-fm-count-null",
+      "title": "COUNT(col) недосчитывает из-за NULL",
+      "cause": "Ожидают, что COUNT(col) посчитает все строки группы, а часть значений col — NULL.",
+      "symptom": "Счётчик меньше числа строк; средние и доли занижены или искажены.",
+      "mechanism": "COUNT(col) и другие агрегаты, кроме COUNT(*), игнорируют NULL.",
+      "fix": "Использовать COUNT(*) для числа строк или COALESCE, если NULL нужно считать как значение.",
+      "prevention": "Осознанно выбирать между COUNT(*), COUNT(col) и COUNT(DISTINCT col)."
+    },
+    {
+      "id": "sql-group-by-fm-count-fanout",
+      "title": "Задвоение счётчика после JOIN один-ко-многим",
+      "cause": "Перед GROUP BY сделан JOIN, размноживший строки, и считается COUNT(col) вместо COUNT(DISTINCT col).",
+      "symptom": "Число уникальных сущностей завышено кратно числу присоединённых строк.",
+      "mechanism": "JOIN один-ко-многим повторяет строки родителя, и COUNT считает повторы.",
+      "fix": "COUNT(DISTINCT ...) или предварительная агрегация каждой дочерней таблицы до JOIN.",
+      "prevention": "Следить за кардинальностью JOIN перед агрегацией."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "Итоги считаются в базе рядом с данными, а не в приложении на всех строках.",
+      "GROUP BY по нескольким колонкам и HAVING строят готовые срезы одним запросом."
+    ],
+    "costs": [
+      "Группировка больших таблиц требует хеш-таблицы или сортировки (в плане HashAggregate / GroupAggregate), может уходить в work_mem и на диск.",
+      "GROUP BY схлопывает строки: детали внутри группы теряются."
+    ],
+    "risks": [
+      "Агрегат в WHERE или забытая колонка в GROUP BY роняют запрос.",
+      "COUNT не той колонки и NULL тихо дают неверные цифры в отчёте."
+    ],
+    "when_tradeoff_matters": "На больших таблицах и частых отчётах: группировка миллионов строк дорога по CPU и памяти, и её выносят в предагрегацию, materialized view или считают инкрементально."
+  },
+  "usage": {
+    "use_when": [
+      "Нужны агрегаты по срезам: счётчики, суммы, средние по группам.",
+      "Строится сводный отчёт: по клиентам, дням, статусам, категориям."
+    ],
+    "avoid_when": [
+      "Нужны и агрегат, и детальные строки одновременно — это оконные функции.",
+      "Нужна лишь проверка существования связанной строки — EXISTS дешевле."
+    ],
+    "signals": [
+      "В требовании звучит «по каждому», «сколько», «сумма/среднее по ...».",
+      "Ответ должен содержать по одной строке на сущность-срез."
+    ],
+    "production_considerations": [
+      "Индекс по колонкам GROUP BY может дать GroupAggregate без сортировки.",
+      "Смотреть план: HashAggregate против GroupAggregate, не уходит ли агрегация на диск.",
+      "Частые тяжёлые агрегаты — кандидаты на предрасчёт."
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "sql-window-functions",
+      "dimension": "Схлопывание строк",
+      "difference": "GROUP BY сворачивает группу в одну строку и теряет детали. Оконная функция считает агрегат/ранг по окну, но оставляет все исходные строки, добавляя колонку.",
+      "why_it_matters": "Если нужны и агрегат, и детальные строки (ранг, нарастающий итог, доля от общего), берут оконную функцию, а не GROUP BY."
+    },
+    {
+      "concept_id": "sql-window-functions",
+      "dimension": "Фильтрация результата",
+      "difference": "Результат GROUP BY фильтруют HAVING по агрегатам. Оконную функцию нельзя использовать в WHERE или HAVING той же выборки — только через подзапрос или CTE.",
+      "why_it_matters": "Задачи вроде «топ-N на группу» на оконках требуют обёртки в подзапрос, тогда как на агрегатах хватает HAVING."
+    }
+  ],
+  "claims": [],
+  "retrieval": [
+    {
+      "id": "sql-group-by-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Зачем нужен GROUP BY и какие агрегатные функции знаете?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "GROUP BY сворачивает строки в группы по значению одной или нескольких колонок, а агрегатная функция считает по каждой группе одно число. Основные агрегаты: COUNT, SUM, AVG, MIN, MAX. На выходе — по одной строке на группу.",
+      "key_points": [
+        "свернуть строки в группы",
+        "одно значение на группу",
+        "COUNT, SUM, AVG, MIN, MAX"
+      ],
+      "common_mistakes": [
+        "Путать GROUP BY с ORDER BY."
+      ],
+      "hints": [],
+      "follow_up": "Чем WHERE отличается от HAVING?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "group-by",
+        "recall"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-02",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Чем WHERE отличается от HAVING?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "WHERE фильтрует отдельные строки до группировки и не видит агрегатов. HAVING фильтрует уже сгруппированные данные по значениям агрегатов (например, `HAVING SUM(amount) > 1000`). Порядок: WHERE → GROUP BY → HAVING.",
+      "key_points": [
+        "WHERE — до группировки, по строкам",
+        "HAVING — после группировки, по агрегатам",
+        "агрегат допустим только в HAVING"
+      ],
+      "common_mistakes": [
+        "Считать, что HAVING всегда медленнее и его надо избегать.",
+        "Ставить обычный фильтр по строке в HAVING вместо WHERE."
+      ],
+      "hints": [],
+      "follow_up": "Куда поставить фильтр `status = 'paid'` и почему?",
+      "priority": "critical",
+      "difficulty": 1,
+      "tags": [
+        "group-by",
+        "having"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "Почему в SELECT с GROUP BY нельзя указать произвольный столбец?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Каждый столбец в SELECT должен быть либо в GROUP BY, либо под агрегатом. Иначе для группы значение столбца неоднозначно: в неё попало много строк с разными значениями, и база не знает, какое показать. PostgreSQL выдаёт `column ... must appear in the GROUP BY clause or be used in an aggregate function`. Исключение — колонки, функционально зависящие от первичного ключа, по которому идёт группировка.",
+      "key_points": [
+        "правило: в GROUP BY или под агрегатом",
+        "иначе значение для группы неоднозначно",
+        "ошибка must appear in the GROUP BY clause",
+        "исключение: функциональная зависимость от PK"
+      ],
+      "common_mistakes": [
+        "Думать, что база возьмёт «любое» значение — в PostgreSQL это ошибка, а не как в старом MySQL."
+      ],
+      "hints": [],
+      "follow_up": "Как исправить, если столбец всё же нужен в выводе?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "group-by",
+        "select"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-04",
+      "type": "explain",
+      "level": "L2",
+      "question": "В чём разница COUNT(*), COUNT(col) и COUNT(DISTINCT col) и как агрегаты ведут себя с NULL?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "COUNT(*) считает все строки группы. COUNT(col) — только строки, где col не NULL. COUNT(DISTINCT col) — число уникальных не-NULL значений. Остальные агрегаты (SUM, AVG, MIN, MAX) тоже игнорируют NULL; AVG делит сумму на число не-NULL значений, а SUM по группе без единого значения вернёт NULL, а не 0.",
+      "key_points": [
+        "COUNT(*) — все строки",
+        "COUNT(col) — без NULL",
+        "COUNT(DISTINCT col) — уникальные не-NULL",
+        "SUM/AVG/MIN/MAX игнорируют NULL",
+        "AVG делит на число не-NULL"
+      ],
+      "common_mistakes": [
+        "Считать, что AVG учитывает NULL как 0."
+      ],
+      "hints": [],
+      "follow_up": "Как посчитать среднее, считая NULL нулём?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "group-by",
+        "count",
+        "null"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-05",
+      "type": "predict",
+      "level": "L3",
+      "question": "Что вернёт каждое из четырёх выражений?",
+      "context": "В таблице reviews 5 строк, колонка rating со значениями: 5, 5, NULL, 4, NULL.",
+      "code": "SELECT COUNT(*)             AS c_all,\n       COUNT(rating)        AS c_rating,\n       COUNT(DISTINCT rating) AS c_distinct,\n       AVG(rating)          AS avg_rating\nFROM reviews;",
+      "code_language": "sql",
+      "expected_answer": "c_all = 5 (все строки). c_rating = 3 (три не-NULL значения). c_distinct = 2 (различные не-NULL: 5 и 4). avg_rating = (5 + 5 + 4) / 3 ≈ 4.67 — среднее по трём не-NULL значениям, NULL не участвуют.",
+      "key_points": [
+        "COUNT(*) = 5",
+        "COUNT(rating) = 3",
+        "COUNT(DISTINCT rating) = 2",
+        "AVG = 14/3 ≈ 4.67, NULL игнорируются"
+      ],
+      "common_mistakes": [
+        "Посчитать AVG как 14/5, включив NULL в делитель."
+      ],
+      "hints": [
+        "Сколько значений rating не равны NULL?"
+      ],
+      "follow_up": "Каким станет AVG, если NULL считать нулём?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "group-by",
+        "count",
+        "predict",
+        "null"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-06",
+      "type": "design",
+      "level": "L3",
+      "question": "Напишите запрос: для каждого клиента вывести число заказов и общую сумму, оставить только клиентов с суммой больше 1000, отсортировать по убыванию суммы.",
+      "context": "Таблица orders(id, user_id, amount).",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "```sql\nSELECT user_id,\n       COUNT(*)    AS orders_count,\n       SUM(amount) AS total\nFROM orders\nGROUP BY user_id\nHAVING SUM(amount) > 1000\nORDER BY total DESC;\n```\nГруппируем по user_id, считаем COUNT(*) и SUM(amount), фильтр по агрегату — в HAVING, сортировка по алиасу total (он виден в ORDER BY).",
+      "key_points": [
+        "GROUP BY user_id",
+        "COUNT(*) и SUM(amount)",
+        "HAVING SUM(amount) > 1000, не WHERE",
+        "ORDER BY по сумме"
+      ],
+      "common_mistakes": [
+        "Поставить `SUM(amount) > 1000` в WHERE.",
+        "Использовать алиас total в WHERE."
+      ],
+      "hints": [],
+      "follow_up": "Как добавить фильтр «только оплаченные заказы»?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "group-by",
+        "having",
+        "design"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-07",
+      "type": "debug",
+      "level": "L4",
+      "question": "Запрос не выполняется. В чём причина и как исправить?",
+      "context": "Нужна сумма заказов по каждому клиенту.",
+      "code": "SELECT user_id, status, SUM(amount)\nFROM orders\nGROUP BY user_id;",
+      "code_language": "sql",
+      "expected_answer": "Ошибка `column \"orders.status\" must appear in the GROUP BY clause or be used in an aggregate function`. Столбец status не входит в GROUP BY и не под агрегатом, а в группе по user_id может быть много разных статусов. Исправления по смыслу: (1) убрать status, если нужна только сумма по клиенту; (2) добавить status в GROUP BY, если нужен срез по клиенту и статусу; (3) обернуть в агрегат, например MAX(status).",
+      "key_points": [
+        "ошибка must appear in the GROUP BY clause",
+        "status не в GROUP BY и не агрегат",
+        "убрать / добавить в GROUP BY / обернуть в агрегат"
+      ],
+      "common_mistakes": [
+        "Думать, что база возьмёт произвольный status."
+      ],
+      "hints": [
+        "Что стало бы значением status для группы из десяти заказов с разными статусами?"
+      ],
+      "follow_up": "Как изменится смысл, если добавить status в GROUP BY?",
+      "priority": "important",
+      "difficulty": 3,
+      "tags": [
+        "group-by",
+        "debug"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-08",
+      "type": "debug",
+      "level": "L4",
+      "question": "Почему запрос падает и как его переписать?",
+      "context": "Хотят оставить клиентов, у которых сумма заказов больше 1000.",
+      "code": "SELECT user_id, SUM(amount) AS total\nFROM orders\nWHERE SUM(amount) > 1000\nGROUP BY user_id;",
+      "code_language": "sql",
+      "expected_answer": "Ошибка `aggregate functions are not allowed in WHERE`. WHERE выполняется до GROUP BY, когда агрегатов ещё нет. Фильтр по агрегату ставят в HAVING:\n```sql\nSELECT user_id, SUM(amount) AS total\nFROM orders\nGROUP BY user_id\nHAVING SUM(amount) > 1000;\n```",
+      "key_points": [
+        "aggregate functions are not allowed in WHERE",
+        "WHERE до группировки",
+        "фильтр по агрегату — в HAVING"
+      ],
+      "common_mistakes": [
+        "Пытаться сослаться на алиас total в WHERE."
+      ],
+      "hints": [
+        "На каком шаге конвейера появляется SUM?"
+      ],
+      "follow_up": "А если нужно ещё и отфильтровать только оплаченные заказы?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "group-by",
+        "having",
+        "debug"
+      ]
+    },
+    {
+      "id": "sql-group-by-q-09",
+      "type": "decision",
+      "level": "L6",
+      "question": "Когда GROUP BY недостаточно и нужны оконные функции?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "GROUP BY годится, когда нужен только итог по срезу и детальные строки не нужны. Как только требуется и агрегат, и сами строки — ранг внутри группы, нарастающий итог, доля строки от суммы группы, предыдущее/следующее значение — GROUP BY не подходит: он схлопывает строки. Тогда берут оконные функции: они считают по окну, но сохраняют все строки. Trade-off: оконка не уменьшает объём вывода и не заменяет группировку там, где сводка и нужна.",
+      "key_points": [
+        "GROUP BY — только сводка, детали теряются",
+        "оконки — агрегат + детальные строки",
+        "ранг, нарастающий итог, доля, LAG/LEAD",
+        "оконка не сокращает число строк"
+      ],
+      "common_mistakes": [
+        "Пытаться получить и детали, и агрегат одним GROUP BY через хитрые самоджойны."
+      ],
+      "hints": [],
+      "follow_up": "Как оконной функцией посчитать долю заказа в сумме клиента?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "group-by",
+        "decision",
+        "window"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "sql-group-by-we-01",
+      "title": "Топ-5 клиентов по сумме оплаченных заказов",
+      "problem": "Нужны пять клиентов с наибольшей суммой оплаченных заказов: id, имя и сумма.",
+      "context": "Таблицы users(id, name) и orders(id, user_id, amount, status).",
+      "solution": {
+        "steps": [
+          "Фильтр `status = 'paid'` относится к строкам — ставим в WHERE, до группировки, чтобы в агрегат попали только оплаченные.",
+          "Соединяем users и orders по user_id, чтобы получить имя.",
+          "Группируем по u.id (первичный ключ), в SELECT можно взять u.name — он функционально зависит от ключа; для переносимости добавляем u.name в GROUP BY.",
+          "Считаем SUM(o.amount), сортируем по убыванию и берём LIMIT 5."
+        ],
+        "code": "SELECT u.id, u.name, SUM(o.amount) AS total\nFROM users u\nJOIN orders o ON o.user_id = u.id\nWHERE o.status = 'paid'\nGROUP BY u.id, u.name\nORDER BY total DESC\nLIMIT 5;"
+      },
+      "why_it_works": "WHERE отсекает неоплаченные строки до группировки, GROUP BY сворачивает заказы каждого клиента, SUM даёт итог, ORDER BY + LIMIT выбирают топ-5.",
+      "alternatives": [
+        "Оконная функция `SUM(...) OVER (PARTITION BY u.id)` с последующим отбором, если рядом нужны и детальные заказы."
+      ],
+      "tradeoffs": [
+        "На больших orders агрегация дорога; для частого дашборда стоит предрассчитывать."
+      ],
+      "common_mistakes": [
+        "Поставить `status = 'paid'` в HAVING вместо WHERE.",
+        "Забыть, что INNER JOIN отбросит клиентов без оплаченных заказов — если они нужны, LEFT JOIN и COUNT(o.id)."
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "sql-group-by-pr-01",
+      "type": "code",
+      "title": "Средний чек по дням",
+      "task": "Таблица orders(id, user_id, amount, created_at timestamptz). Напиши запрос: по каждой календарной дате вывести число заказов и средний чек, оставить только дни, где заказов не меньше 10, отсортировать по убыванию среднего чека.",
+      "constraints": [
+        "Группировка по календарному дню, а не по timestamp."
+      ],
+      "expected_output": "Строки: день, orders_count, avg_check — только дни с >= 10 заказами, от большего среднего чека.",
+      "solution": {
+        "description": "Группируем по `created_at::date`, считаем COUNT(*) и AVG(amount). Фильтр по числу заказов — по агрегату, значит HAVING. Сортировка по среднему чеку.",
+        "code": "SELECT created_at::date AS day,\n       COUNT(*)           AS orders_count,\n       AVG(amount)        AS avg_check\nFROM orders\nGROUP BY created_at::date\nHAVING COUNT(*) >= 10\nORDER BY avg_check DESC;"
+      },
+      "evaluation_points": [
+        "Группировка по дате, а не по timestamp",
+        "AVG(amount) для среднего чека",
+        "HAVING COUNT(*) >= 10, не WHERE",
+        "сортировка по среднему чеку"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "sql-group-by-pr-02",
+      "type": "debug",
+      "title": "Число уникальных покупателей завышено",
+      "task": "Нужно по каждому товару посчитать, сколько РАЗНЫХ покупателей его купили. Запрос `SELECT product_id, COUNT(user_id) AS buyers FROM order_items GROUP BY product_id` даёт числа больше реальных. Объясни причину и исправь.",
+      "constraints": [
+        "Один пользователь может купить товар несколько раз."
+      ],
+      "expected_output": "По товару — число различных покупателей.",
+      "solution": {
+        "description": "COUNT(user_id) считает строки, а повторные покупки одного пользователя дают несколько строк — счётчик задвоен. Нужно COUNT(DISTINCT user_id).",
+        "code": "SELECT product_id,\n       COUNT(DISTINCT user_id) AS buyers\nFROM order_items\nGROUP BY product_id;"
+      },
+      "evaluation_points": [
+        "Понял, что COUNT(user_id) считает строки, а не людей",
+        "COUNT(DISTINCT user_id)",
+        "повторные покупки задваивают"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "sql-group-by-pr-03",
+      "type": "code",
+      "title": "Выручка по месяцам",
+      "task": "Таблицы orders(id, amount, status, created_at). Напиши запрос: выручка (сумма оплаченных заказов) по каждому месяцу, по возрастанию месяца.",
+      "constraints": [
+        "Учитывать только status = 'paid'.",
+        "Месяц — начало месяца."
+      ],
+      "expected_output": "Строки: month, revenue — по возрастанию месяца.",
+      "solution": {
+        "description": "Фильтр по статусу — в WHERE (по строке). Группировка по началу месяца через date_trunc. SUM(amount) как выручка.",
+        "code": "SELECT date_trunc('month', created_at) AS month,\n       SUM(amount)                    AS revenue\nFROM orders\nWHERE status = 'paid'\nGROUP BY date_trunc('month', created_at)\nORDER BY month;"
+      },
+      "evaluation_points": [
+        "WHERE status = 'paid' (по строке, до группировки)",
+        "date_trunc('month', ...) для месяца",
+        "SUM(amount)",
+        "ORDER BY month"
+      ],
+      "difficulty": 3
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "sql-window-functions",
+      "relation": "next"
+    },
+    {
+      "concept_id": "sql-join",
+      "relation": "related"
+    },
+    {
+      "concept_id": "postgresql-explain",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Есть таблица orders: одна строка на заказ, десятки тысяч строк. Начальник просит отчёт: сколько заказов у каждого клиента и на какую сумму. Построчно это не ответить — нужна сводка.\n\nСоберём GROUP BY по шагам: каждый вопрос отчёта будет вскрывать новую деталь.",
+    "beats": [
+      {
+        "problem": "10 000 строк заказов. Нужно «сколько заказов у каждого клиента». **Как из множества строк сделать по одной на клиента?**",
+        "solution": "Сказать базе: сложи строки в стопки по user_id. Строки с одинаковым user_id — одна группа. На выходе — по одной строке на группу.",
+        "term": "GROUP BY",
+        "analogy": "Разложить бумажные чеки по стопкам: своя стопка на каждого клиента."
+      },
+      {
+        "problem": "В стопке клиента много строк, а в отчёте нужно одно число — сумма и количество. **Как свернуть стопку в число?**",
+        "solution": "К каждой группе применяется функция, которая из многих строк делает одно значение: COUNT — сколько строк, SUM — сумма, AVG — среднее, MIN/MAX — минимум и максимум.",
+        "term": "агрегатная функция",
+        "analogy": "Взять стопку чеков и написать на ней итог: «12 заказов, 8400 рублей»."
+      },
+      {
+        "problem": "Пишу `SELECT user_id, product_name, SUM(amount) ... GROUP BY user_id` — и ошибка. **Почему нельзя вывести product_name?**",
+        "solution": "В группе одного клиента десятки заказов с разными товарами. Какой product_name показать в единственной строке группы? Неоднозначно — база отказывается гадать. Правило: в SELECT только колонки из GROUP BY или агрегаты.",
+        "term": null,
+        "analogy": "На стопке чеков нельзя написать один «товар» — их там много разных."
+      },
+      {
+        "problem": "Нужны только клиенты с суммой больше 1000. Пишу `WHERE SUM(amount) > 1000` — снова ошибка. **Почему фильтр по сумме не работает в WHERE?**",
+        "solution": "WHERE отбирает строки ещё до того, как их сложили в стопки, — суммы группы тогда просто не существует. Фильтр по агрегату вешают после группировки, отдельным словом HAVING.",
+        "term": "HAVING",
+        "analogy": "Нельзя выбросить «лёгкие стопки», пока чеки ещё лежат вперемешку: сначала разложи и посчитай, потом убирай стопки."
+      },
+      {
+        "problem": "А обычный фильтр — «только оплаченные заказы» — куда? В HAVING или WHERE? **Есть ли разница?**",
+        "solution": "Фильтр по строке — в WHERE, до группировки: так в стопки попадёт меньше чеков и работы будет меньше. HAVING — только для условий по агрегатам. Полный порядок: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT.",
+        "term": null,
+        "analogy": "Сначала выкинь ненужные чеки (WHERE), потом разложи по стопкам, и уже потом убирай мелкие стопки (HAVING)."
+      },
+      {
+        "problem": "Считаю `COUNT(rating)` по отзывам — число меньше, чем строк. **Куда делись строки?**",
+        "solution": "COUNT(col) не считает NULL. У части отзывов оценка не проставлена — эти строки выпали. COUNT(*) считает все строки, COUNT(col) — только с не-NULL значением, COUNT(DISTINCT col) — уникальные значения. То же с SUM/AVG: NULL они пропускают, и AVG делит на число не-NULL.",
+        "term": null,
+        "analogy": "Считаешь чеки с печатью: без печати — не в счёт, хотя чек в стопке лежит."
+      },
+      {
+        "problem": "**Чем заплатили за сводку?**",
+        "solution": "Деталями. GROUP BY схлопывает строки: остаётся итог по группе, а сами заказы исчезают. Если в одном отчёте нужны и итог, и строки — ранг заказа, доля в сумме клиента, нарастающий итог, — GROUP BY не хватит, и в дело идут оконные функции.",
+        "term": null,
+        "analogy": "От стопки остаётся только надпись с итогом; сами чеки уже не посмотреть."
+      }
+    ],
+    "outro": "**Как сказать на интервью:** GROUP BY группирует строки по колонкам, агрегатные функции (COUNT, SUM, AVG, MIN, MAX) считают по каждой группе одно значение. В SELECT можно только колонки из GROUP BY или агрегаты. WHERE фильтрует строки до группировки, HAVING — группы после, по агрегатам. Порядок выполнения: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. COUNT(*) считает все строки, COUNT(col) — без NULL, COUNT(DISTINCT col) — уникальные значения."
+  },
+  "short_answer": {
+    "junior": "GROUP BY группирует строки по значению колонки (например, заказы по клиентам), а агрегатные функции COUNT, SUM, AVG, MIN, MAX считают по каждой группе одно число. WHERE фильтрует строки до группировки, HAVING — уже готовые группы по агрегатам, например «сумма больше 1000».",
+    "middle": "GROUP BY сворачивает строки в группы по одной или нескольким колонкам, агрегаты (COUNT, SUM, AVG, MIN, MAX) дают по группе одно значение. В SELECT можно указывать только колонки из GROUP BY или агрегаты — иначе значение для группы неоднозначно и запрос падает с `must appear in the GROUP BY clause`.\n\nWHERE фильтрует строки до группировки и не видит агрегатов; HAVING фильтрует группы после агрегации (`HAVING SUM(amount) > 1000`). Обычные фильтры по строке ставят в WHERE, чтобы в группировку попало меньше данных.\n\nПорядок выполнения: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. Поэтому алиас из SELECT не виден в WHERE, но виден в ORDER BY.",
+    "senior": "Всё из middle, плюс:\n- COUNT(*) считает все строки, COUNT(col) — только не-NULL, COUNT(DISTINCT col) — уникальные не-NULL значения. SUM/AVG/MIN/MAX игнорируют NULL; AVG делит на число не-NULL, а SUM пустой группы даёт NULL, не 0.\n- GROUP BY по нескольким колонкам группирует по их комбинации. Можно группировать по выражению (`created_at::date`), номеру позиции или алиасу.\n- Если группировать по первичному ключу, PostgreSQL разрешает выбирать зависящие от него колонки без включения в GROUP BY (функциональная зависимость).\n- После JOIN один-ко-многим COUNT(col) задваивается — нужен COUNT(DISTINCT) или агрегация до JOIN.\n- Физически это HashAggregate или GroupAggregate; на больших данных агрегация уходит в work_mem и на диск, поэтому тяжёлые отчёты предрассчитывают.\n- Когда нужны и агрегат, и детальные строки (ранг, доля, нарастающий итог) — GROUP BY не подходит, берут оконные функции.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "GROUP BY сворачивает строки в группы",
+          "mermaid": "flowchart LR\n  A[\"заказы<br/>user 1: 500<br/>user 1: 300<br/>user 2: 700\"] --> G[\"GROUP BY user_id\"]\n  G --> B[\"user 1: SUM = 800<br/>user 2: SUM = 700\"]",
+          "caption": "Строки с одинаковым user_id складываются в одну группу, агрегат даёт по группе одно число."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Порядок выполнения запроса",
+          "mermaid": "flowchart LR\n  F[\"FROM<br/>берём строки\"] --> W[\"WHERE<br/>фильтр по строкам\"]\n  W --> G[\"GROUP BY<br/>группируем\"]\n  G --> H[\"HAVING<br/>фильтр по группам\"]\n  H --> S[\"SELECT<br/>колонки и агрегаты\"]\n  S --> O[\"ORDER BY / LIMIT\"]",
+          "caption": "WHERE работает до группировки по строкам, HAVING — после, по агрегатам. Алиас из SELECT виден только в ORDER BY."
+        },
+        {
+          "title": "WHERE отсекает строки, HAVING — группы",
+          "mermaid": "flowchart TD\n  R[\"строки заказов\"] --> W[\"WHERE status = 'paid'<br/>убирает строки\"]\n  W --> G[\"GROUP BY user_id<br/>строки → группы\"]\n  G --> H[\"HAVING SUM(amount) > 1000<br/>убирает группы\"]\n  H --> Res[\"итог: по строке на клиента\"]",
+          "caption": "Фильтр по строке — в WHERE до группировки, фильтр по агрегату — в HAVING после."
+        }
+      ]
+    }
+  }
+}
