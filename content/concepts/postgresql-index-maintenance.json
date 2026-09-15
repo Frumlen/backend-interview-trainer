@@ -1,0 +1,687 @@
+{
+  "id": "postgresql-index-maintenance",
+  "title": "Обслуживание индексов: bloat, REINDEX, Index Only Scan",
+  "domain": "Базы данных / Индексы",
+  "level": "L4",
+  "tags": [
+    "postgresql",
+    "index",
+    "maintenance",
+    "bloat",
+    "vacuum"
+  ],
+  "prerequisites": [
+    "postgresql-index"
+  ],
+  "summary": "Индекс — не «создал и забыл». Из-за MVCC при UPDATE/DELETE в индексе копятся мёртвые записи, и он раздувается (bloat): становится больше, читается медленнее. Autovacuum чистит мёртвые кортежи, но не уплотняет структуру — для этого есть REINDEX (на проде — REINDEX INDEX CONCURRENTLY, без простоя). Index Only Scan возвращает данные прямо из индекса, но только если VACUUM отметил страницы как all-visible в visibility map; иначе PostgreSQL идёт в таблицу (Heap Fetch) и выигрыш пропадает.",
+  "mental_model": {
+    "type": "state_machine",
+    "description": "Индекс живёт в нескольких состояниях. Обычная работа с MVCC медленно уводит его в bloat; REINDEX возвращает в компактную форму. Прерванный REINDEX CONCURRENTLY оставляет INVALID-индекс, а смена collation или сбой хранилища — повреждённый. Обслуживание — это переходы обратно в «здоровое» состояние.",
+    "elements": [
+      "компактный",
+      "bloated",
+      "INVALID",
+      "повреждённый"
+    ],
+    "relations": [
+      "компактный -> bloated: UPDATE/DELETE копят мёртвые записи (MVCC)",
+      "bloated -> компактный: REINDEX / REINDEX CONCURRENTLY",
+      "компактный -> INVALID: REINDEX CONCURRENTLY прерван",
+      "INVALID -> компактный: DROP INDEX + пересоздать или REINDEX CONCURRENTLY заново",
+      "компактный -> повреждённый: смена collation (glibc) или сбой хранилища",
+      "повреждённый -> компактный: amcheck выявил, REINDEX вылечил"
+    ],
+    "diagram": null,
+    "table": null
+  },
+  "problem": {
+    "question": "Индекс создан и подходит под запрос, но со временем запросы по нему замедляются, а иногда план показывает Index Only Scan, который всё равно медленный. Что с индексом происходит и как вернуть ему форму?",
+    "context": "Из-за MVCC каждое изменение строки оставляет в таблице и индексе старые версии. Индекс — отдельная структура, которую нужно поддерживать: сам по себе он не уплотняется и не «чинится».",
+    "why_it_matters": "Раздутый индекс — это лишний I/O на каждом запросе и лишнее место; на нагруженной таблице деградация накапливается незаметно, пока запрос не станет вдвое-втрое медленнее при том же плане."
+  },
+  "mechanism": {
+    "steps": [
+      {
+        "order": 1,
+        "title": "MVCC оставляет мёртвые записи в индексе",
+        "description": "UPDATE в PostgreSQL создаёт новую версию строки, DELETE помечает старую как мёртвую. Обычно в каждый индекс добавляется новая запись, а старая остаётся указывать на мёртвую версию строки. Так в индексе накапливаются мёртвые записи."
+      },
+      {
+        "order": 2,
+        "title": "HOT update частично спасает",
+        "description": "Если изменяемые колонки не входят ни в один индекс и на странице есть свободное место, срабатывает HOT update: новая версия строки живёт на той же странице, и индексы не трогаются. Поэтому лишний индекс на часто обновляемой колонке ломает HOT и ускоряет bloat."
+      },
+      {
+        "order": 3,
+        "title": "Autovacuum чистит мёртвое, но не уплотняет",
+        "description": "Autovacuum удаляет мёртвые кортежи и помечает место как свободное для переиспользования, но не возвращает его ОС и не перестраивает дерево. Страницы B-tree остаются полупустыми и фрагментированными — это и есть bloat: индекс крупнее, чем нужно, значит больше страниц, больше I/O, медленнее поиск."
+      },
+      {
+        "order": 4,
+        "title": "Найти bloat",
+        "description": "Точная оценка — расширение `pgstattuple` (`pgstatindex` показывает `avg_leaf_density` и `leaf_fragmentation`), быстрая прикидка — оценочные запросы к системным каталогам. Ориентир: если bloat выше ~20-30%, индекс стоит перестроить."
+      },
+      {
+        "order": 5,
+        "title": "REINDEX перестраивает индекс с нуля",
+        "description": "`REINDEX INDEX name` строит индекс заново, компактно. Обычный REINDEX берёт ACCESS EXCLUSIVE lock на сам индекс и блокирует запись в таблицу и чтение через этот индекс — на проде это простой. `REINDEX INDEX CONCURRENTLY` (с PG12) берёт SHARE UPDATE EXCLUSIVE: чтение и запись в таблицу продолжаются. Он делает два прохода по таблице и финальную подмену в каталоге, поэтому дольше, не выполняется внутри транзакции, и на одну таблицу идёт один concurrent-ребилд за раз."
+      },
+      {
+        "order": 6,
+        "title": "Прерванный CONCURRENTLY оставляет INVALID-индекс",
+        "description": "Если concurrent-ребилд упал (например, нарушение уникальности на втором проходе или отмена команды), остаётся невалидный индекс (`pg_index.indisvalid = false`, часто с суффиксом `_ccnew`). Планировщик его не использует, но запись его всё равно поддерживает — то есть это чистый налог на INSERT/UPDATE. Его нужно либо `DROP INDEX`, либо `REINDEX INDEX CONCURRENTLY` заново."
+      },
+      {
+        "order": 7,
+        "title": "«Побитый» индекс и collation",
+        "description": "Редко индекс повреждается: сбой хранилища, баг, или — важный реальный кейс — смена collation. Обновление glibc может изменить порядок сортировки, и B-tree по `text`, построенный при старом порядке, становится некорректным: поиск может «не находить» существующие строки. Проверка — расширение `amcheck` (`bt_index_check`), лечение — REINDEX. REINDEX также нужен после подозрения на повреждение и иногда после major-upgrade через `pg_upgrade`."
+      },
+      {
+        "order": 8,
+        "title": "Index Only Scan зависит от свежести VACUUM",
+        "description": "Index Only Scan возвращает данные прямо из индекса, не читая таблицу — быстрее. Условия: (а) все нужные колонки есть в индексе (в т.ч. covering-индекс через `INCLUDE`), и (б) для страницы выставлен бит в visibility map — VACUUM подтвердил, что все её строки видимы всем транзакциям. Если бит не выставлен (страницу меняли после последнего VACUUM), PostgreSQL всё равно идёт в таблицу проверить видимость строки — это Heap Fetch, и выигрыш пропадает: по сути обычный Index Scan. В `EXPLAIN (ANALYZE)` это строка `Heap Fetches: N`."
+      }
+    ],
+    "key_objects": [
+      "мёртвые записи в индексе (MVCC)",
+      "HOT update",
+      "autovacuum",
+      "REINDEX / REINDEX CONCURRENTLY",
+      "visibility map",
+      "Heap Fetches",
+      "amcheck / pgstattuple"
+    ],
+    "important_distinctions": [
+      "Autovacuum убирает мёртвые кортежи, но не уплотняет индекс — уплотняет только REINDEX",
+      "Обычный REINDEX блокирует (ACCESS EXCLUSIVE), REINDEX CONCURRENTLY — нет (SHARE UPDATE EXCLUSIVE), но дольше и не в транзакции",
+      "Index Only Scan в плане не значит «в таблицу не ходим»: смотреть надо на Heap Fetches",
+      "INVALID-индекс планировщик не использует, но запись его поддерживает — он бесполезен и дорог одновременно"
+    ]
+  },
+  "minimal_example": {
+    "language": "sql",
+    "code": "-- covering-индекс: все нужные колонки внутри индекса\nCREATE INDEX orders_uid_created_idx ON orders (user_id) INCLUDE (created_at);\n\n-- сразу после массовых изменений: visibility map устарел\nEXPLAIN (ANALYZE)\nSELECT user_id, created_at FROM orders WHERE user_id = 42;\n--  Index Only Scan using orders_uid_created_idx on orders\n--    (actual rows=5000)\n--    Heap Fetches: 5000        <- ходили в таблицу за каждой строкой, выигрыша нет\n\nVACUUM orders;                  -- обновит visibility map\n\nEXPLAIN (ANALYZE)\nSELECT user_id, created_at FROM orders WHERE user_id = 42;\n--  Index Only Scan using orders_uid_created_idx on orders\n--    (actual rows=5000)\n--    Heap Fetches: 0           <- ответ целиком из индекса",
+    "explanation": "Один и тот же Index Only Scan работает по-разному. До VACUUM бит в visibility map не выставлен, и на каждую строку идёт Heap Fetch — выигрыша над обычным Index Scan нет. После VACUUM бит выставлен, `Heap Fetches: 0`, ответ отдаётся прямо из индекса. Отсюда прямая связь Index Only Scan с обслуживанием: он работает настолько, насколько свеж VACUUM.",
+    "expected_result": "Heap Fetches падает с 5000 до 0 после VACUUM; запрос ускоряется, план остаётся Index Only Scan."
+  },
+  "details": [
+    {
+      "title": "Bloat — это не «мусор», а полупустые страницы",
+      "description": "После autovacuum место в индексе помечено свободным и переиспользуется под новые записи, но фрагментированные, наполовину пустые страницы остаются. Индекс продолжает занимать столько же места и читаться так же медленно, пока его не перестроят. Поэтому bloat не «рассасывается» сам.",
+      "importance": "critical"
+    },
+    {
+      "title": "REINDEX CONCURRENTLY — цена за отсутствие простоя",
+      "description": "CONCURRENTLY строит новый индекс параллельно старому, делает два прохода по таблице и ждёт старые транзакции, поэтому работает заметно дольше обычного REINDEX и временно требует место под оба индекса. Не запускается внутри транзакции и не поддерживает один-к-одному REINDEX SCHEMA/DATABASE CONCURRENTLY для системных каталогов.",
+      "importance": "important"
+    },
+    {
+      "title": "INVALID-индекс виден в pg_index",
+      "description": "`SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE NOT indisvalid;` показывает недостроенные/сломанные индексы. Их надо разобрать: удалить `DROP INDEX CONCURRENTLY` или перестроить. Пока они висят, каждая запись их обновляет впустую.",
+      "importance": "important"
+    },
+    {
+      "title": "Collation и glibc — тихая порча B-tree",
+      "description": "Индекс по `text`/`varchar` хранит ключи в порядке collation. Если ОС обновила glibc и порядок сравнения строк изменился, дерево остаётся отсортированным по старому порядку — поиск может пропускать существующие строки, а уникальный индекс — пропустить дубликат. Симптом коварный: ошибок нет, просто «строки не находятся». Отсюда практика проверять `amcheck` после апгрейда ОС и перестраивать text-индексы.",
+      "importance": "important"
+    },
+    {
+      "title": "Свежесть visibility map тюнится autovacuum",
+      "description": "Чтобы Index Only Scan реально не ходил в таблицу, страницы должны быть all-visible. На часто изменяемой таблице их VACUUM не успевает подтверждать — растёт Heap Fetches. Лечится более агрессивным autovacuum на этой таблице (снизить `autovacuum_vacuum_scale_factor`) или ручным VACUUM после массовой загрузки.",
+      "importance": "secondary"
+    }
+  ],
+  "invariants": [
+    {
+      "statement": "Autovacuum поддерживает индекс работоспособным, но не компактным",
+      "why": "Он удаляет мёртвые кортежи и помечает место свободным, но не перестраивает дерево и не возвращает место ОС. Уплотнение делает только REINDEX."
+    },
+    {
+      "statement": "Index Only Scan не читает таблицу только для страниц, помеченных all-visible",
+      "why": "Индекс не хранит информацию о видимости версий строк. Гарантию «все строки этой страницы видимы всем» даёт visibility map, которую заполняет VACUUM; без неё приходится проверять видимость в самой таблице (Heap Fetch)."
+    },
+    {
+      "statement": "INVALID-индекс поддерживается записью, но не используется чтением",
+      "why": "PostgreSQL продолжает вносить в него изменения, чтобы при желании его можно было достроить, но планировщик его игнорирует как потенциально неполный."
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "postgresql-index-maintenance-fm-bloat",
+      "title": "Bloat после массовых UPDATE/DELETE",
+      "cause": "Долгий поток UPDATE/DELETE по таблице; индекс на часто обновляемой колонке ломает HOT update.",
+      "symptom": "Тот же запрос с тем же планом (Index Scan) со временем стал в разы медленнее; индекс заметно вырос в размере (`pg_relation_size`).",
+      "mechanism": "MVCC оставляет в индексе мёртвые записи. Autovacuum убирает их, но структуру не уплотняет — страницы B-tree полупустые и фрагментированные, значит их больше и на поиск нужно больше I/O.",
+      "fix": "Оценить bloat (`pgstattuple`/`pgstatindex` или оценочные запросы); при bloat выше ~20-30% перестроить `REINDEX INDEX CONCURRENTLY`.",
+      "prevention": "Настроить autovacuum на активной таблице агрессивнее; не держать лишних индексов на часто обновляемых колонках, чтобы не терять HOT."
+    },
+    {
+      "id": "postgresql-index-maintenance-fm-invalid",
+      "title": "INVALID-индекс после прерванного REINDEX CONCURRENTLY",
+      "cause": "REINDEX INDEX CONCURRENTLY упал или был отменён (нарушение уникальности на втором проходе, cancel, падение сессии).",
+      "symptom": "В `pg_index` есть строка с `indisvalid = false` (часто имя с суффиксом `_ccnew`); запись в таблицу чуть подорожала, а запрос индекс не использует.",
+      "mechanism": "Concurrent-ребилд оставил недостроенный индекс. Планировщик его игнорирует как неполный, но каждая запись его всё равно обновляет — чистый налог без пользы.",
+      "fix": "Удалить недостроенный индекс `DROP INDEX CONCURRENTLY <name>` (или `REINDEX INDEX CONCURRENTLY` заново, устранив причину падения).",
+      "prevention": "После REINDEX CONCURRENTLY проверять `pg_index.indisvalid`; на уникальных индексах заранее убедиться в отсутствии дубликатов."
+    },
+    {
+      "id": "postgresql-index-maintenance-fm-heap-fetches",
+      "title": "Index Only Scan деградирует из-за устаревшего visibility map",
+      "cause": "Страницы таблицы менялись после последнего VACUUM, их бит в visibility map сброшен.",
+      "symptom": "В плане Index Only Scan, но запрос медленный; `EXPLAIN (ANALYZE)` показывает большое `Heap Fetches`.",
+      "mechanism": "Без выставленного бита PostgreSQL обязан проверить видимость строки в самой таблице (Heap Fetch), то есть фактически выполняет обычный Index Scan — выигрыш Index Only Scan теряется.",
+      "fix": "Выполнить `VACUUM` таблицы, чтобы обновить visibility map; проверить, что Heap Fetches упал.",
+      "prevention": "Более агрессивный autovacuum на этой таблице; ручной VACUUM после массовой загрузки данных."
+    },
+    {
+      "id": "postgresql-index-maintenance-fm-collation",
+      "title": "Повреждение B-tree после смены collation (glibc upgrade)",
+      "cause": "Обновление ОС/glibc изменило порядок сортировки строк; text-индексы построены при старом порядке.",
+      "symptom": "Запросы «не находят» существующие строки по индексу; уникальный индекс может пропустить дубликат; данные при этом на месте.",
+      "mechanism": "B-tree отсортирован по старому collation, а сравнения теперь идут по новому — двоичный поиск сходит не туда. Порча тихая: ошибок нет.",
+      "fix": "Проверить `amcheck` (`bt_index_check`/`bt_index_parent_check`), перестроить пострадавшие индексы `REINDEX`.",
+      "prevention": "После апгрейда ОС проверять text-индексы через amcheck и перестраивать их; фиксировать версию collation там, где это поддерживается."
+    }
+  ],
+  "tradeoffs": {
+    "benefits": [
+      "REINDEX возвращает индексу компактность: меньше I/O, быстрее поиск",
+      "REINDEX CONCURRENTLY перестраивает без простоя — чтение и запись продолжаются",
+      "Index Only Scan при свежем VACUUM отвечает прямо из индекса, не читая таблицу"
+    ],
+    "costs": [
+      "REINDEX CONCURRENTLY дольше обычного и временно требует место под второй индекс",
+      "Обычный REINDEX блокирует запись и чтение через индекс — простой",
+      "Держать visibility map свежим — это регулярный VACUUM, то есть постоянная фоновая работа"
+    ],
+    "risks": [
+      "Прерванный REINDEX CONCURRENTLY оставляет INVALID-индекс — налог на запись без пользы",
+      "Порча из-за collation тихая: без amcheck её легко не заметить"
+    ],
+    "when_tradeoff_matters": "На таблицах с интенсивной записью bloat и устаревший visibility map накапливаются быстро — там обслуживание (autovacuum-тюнинг, периодический REINDEX CONCURRENTLY) окупается. На почти статичных таблицах индекс живёт годами без вмешательства."
+  },
+  "usage": {
+    "use_when": [
+      "Запрос с прежним планом со временем замедлился, индекс вырос — проверить bloat и при необходимости REINDEX CONCURRENTLY",
+      "В плане Index Only Scan с большим Heap Fetches — сделать VACUUM",
+      "После major-upgrade (pg_upgrade) или смены collation/glibc — проверить amcheck и перестроить text-индексы"
+    ],
+    "avoid_when": [
+      "Обычный REINDEX (без CONCURRENTLY) на нагруженной проде-таблице — он заблокирует запись",
+      "REINDEX ради небольшого bloat (единицы процентов) — выигрыш не окупит работу"
+    ],
+    "signals": [
+      "Рост размера индекса при неизменном числе строк (`pg_relation_size`, `pgstatindex`)",
+      "Большое `Heap Fetches` при Index Only Scan в `EXPLAIN (ANALYZE)`",
+      "Строки с `indisvalid = false` в `pg_index`"
+    ],
+    "production_considerations": [
+      "Перестраивать только через `REINDEX INDEX CONCURRENTLY`, вне транзакции, по одному на таблицу",
+      "Тюнить autovacuum на горячих таблицах (`autovacuum_vacuum_scale_factor`), а не полагаться на дефолт",
+      "После REINDEX CONCURRENTLY и после апгрейда ОС проверять состояние индексов (indisvalid, amcheck)"
+    ]
+  },
+  "comparison": [
+    {
+      "concept_id": "postgresql-index",
+      "dimension": "Создание vs поддержание",
+      "difference": "postgresql-index — как индекс устроен и когда его создавать. Этот концепт — как держать уже созданный индекс в форме: bloat, REINDEX, повреждения.",
+      "why_it_matters": "Индекс, который «создали и забыли», со временем деградирует; выигрыш от него держится только при обслуживании."
+    },
+    {
+      "concept_id": "postgresql-explain",
+      "dimension": "Heap Fetches в плане",
+      "difference": "postgresql-explain учит читать план в целом; здесь — конкретный маркер `Heap Fetches`: большое значение при Index Only Scan значит устаревший visibility map, а не проблему самого индекса.",
+      "why_it_matters": "Без этого маркера Index Only Scan в плане ошибочно считают гарантией, что в таблицу не ходят."
+    }
+  ],
+  "claims": [
+    {
+      "id": "postgresql-index-maintenance-claim-01",
+      "statement": "Порог bloat, при котором стоит делать REINDEX, — около 20-30%.",
+      "status": "uncertain",
+      "notes": "Это ориентир из практики, а не жёсткое правило: решение зависит от размера индекса, доли чтения/записи и того, насколько bloat реально влияет на план и I/O. Точную оценку даёт pgstattuple."
+    },
+    {
+      "id": "postgresql-index-maintenance-claim-02",
+      "statement": "Обновление glibc может изменить порядок сортировки строк и сделать text-индексы некорректными.",
+      "status": "confirmed",
+      "notes": "Подтверждённый и известный класс проблем (изменения collation в glibc). Проявляется не всегда — зависит от конкретных версий glibc и данных; проверяется amcheck."
+    }
+  ],
+  "retrieval": [
+    {
+      "id": "postgresql-index-maintenance-q-01",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое bloat индекса и почему индексы со временем деградируют?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Bloat — раздувание индекса: он занимает больше места и читается медленнее, чем нужно по числу строк. Причина — MVCC: при UPDATE/DELETE в индексе копятся мёртвые записи. Autovacuum их убирает, но структуру не уплотняет — страницы остаются полупустыми. Лечится перестройкой индекса (REINDEX).",
+      "key_points": [
+        "раздувание индекса",
+        "MVCC: мёртвые записи при UPDATE/DELETE",
+        "autovacuum чистит, но не уплотняет",
+        "лечится REINDEX"
+      ],
+      "common_mistakes": [
+        "Думать, что autovacuum сам уплотняет индекс",
+        "Считать, что индекс не требует обслуживания"
+      ],
+      "hints": [
+        "Что происходит со старой версией строки при UPDATE?"
+      ],
+      "follow_up": "Как перестроить индекс на проде без простоя?",
+      "priority": "important",
+      "difficulty": 1,
+      "tags": [
+        "bloat",
+        "recall"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-02",
+      "type": "short_answer",
+      "level": "L1",
+      "question": "Что такое Index Only Scan?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Index Only Scan возвращает данные прямо из индекса, не читая таблицу, — поэтому быстрее. Работает, если все нужные колонки есть в индексе (в т.ч. covering-индекс через INCLUDE) и страница помечена как all-visible в visibility map (это подтверждает VACUUM). Иначе PostgreSQL всё равно идёт в таблицу проверить видимость строки (Heap Fetch), и выигрыш пропадает.",
+      "key_points": [
+        "ответ прямо из индекса, без чтения таблицы",
+        "нужны все колонки в индексе",
+        "нужен свежий visibility map (VACUUM)",
+        "иначе Heap Fetch"
+      ],
+      "common_mistakes": [
+        "Считать, что Index Only Scan никогда не читает таблицу",
+        "Забыть про условие visibility map"
+      ],
+      "hints": [
+        "Откуда PostgreSQL узнаёт, что строку видно текущей транзакции?"
+      ],
+      "follow_up": "Почему Index Only Scan в плане может всё равно быть медленным?",
+      "priority": "important",
+      "difficulty": 1,
+      "tags": [
+        "index-only-scan",
+        "recall"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-03",
+      "type": "explain",
+      "level": "L2",
+      "question": "Как из-за MVCC индексы раздуваются? Какую роль играют HOT update и autovacuum?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "UPDATE создаёт новую версию строки, DELETE помечает старую мёртвой; обычно в каждый индекс добавляется новая запись, а старая остаётся указывать на мёртвую версию — так копятся мёртвые записи и растёт bloat.\n\nHOT update это смягчает: если изменяемые колонки не входят ни в один индекс и на странице есть место, новая версия живёт на той же странице и индексы не трогаются. Лишний индекс на обновляемой колонке ломает HOT.\n\nAutovacuum удаляет мёртвые кортежи и освобождает место под переиспользование, но не перестраивает дерево и не возвращает место ОС — страницы остаются полупустыми. Поэтому autovacuum держит индекс рабочим, но компактным его делает только REINDEX.",
+      "key_points": [
+        "UPDATE/DELETE оставляют мёртвые записи",
+        "HOT update избегает записи в индексы",
+        "лишний индекс ломает HOT",
+        "autovacuum чистит, но не уплотняет"
+      ],
+      "common_mistakes": [
+        "Думать, что HOT работает всегда",
+        "Считать, что после autovacuum bloat исчезает"
+      ],
+      "hints": [
+        "Когда UPDATE не добавляет запись в индексы?"
+      ],
+      "follow_up": "Как измерить bloat конкретного индекса?",
+      "priority": "important",
+      "difficulty": 2,
+      "tags": [
+        "mvcc",
+        "bloat",
+        "hot"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-04",
+      "type": "explain",
+      "level": "L2",
+      "question": "Чем REINDEX отличается от REINDEX INDEX CONCURRENTLY? Какие блокировки они берут?",
+      "context": null,
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Оба перестраивают индекс с нуля, компактно. Разница в блокировках. Обычный REINDEX берёт ACCESS EXCLUSIVE на индекс: блокирует запись в таблицу и чтение через этот индекс — на проде это простой, зато быстрее.\n\nREINDEX INDEX CONCURRENTLY (с PG12) берёт SHARE UPDATE EXCLUSIVE: чтение и запись в таблицу продолжаются. Ценой этого он делает два прохода по таблице и финальную подмену в каталоге, поэтому дольше, не выполняется внутри транзакции и на одну таблицу идёт по одному ребилду за раз. Если он прервётся, останется INVALID-индекс, который придётся удалить или перестроить заново.",
+      "key_points": [
+        "оба перестраивают заново",
+        "REINDEX: ACCESS EXCLUSIVE, блокирует, но быстрее",
+        "CONCURRENTLY: SHARE UPDATE EXCLUSIVE, без простоя, но дольше",
+        "CONCURRENTLY не в транзакции, риск INVALID"
+      ],
+      "common_mistakes": [
+        "Считать, что REINDEX CONCURRENTLY ничем не платит за отсутствие простоя",
+        "Запускать обычный REINDEX на нагруженной проде-таблице"
+      ],
+      "hints": [
+        "Что важнее на проде — скорость операции или доступность таблицы?"
+      ],
+      "follow_up": "Что останется, если REINDEX CONCURRENTLY упадёт посередине?",
+      "priority": "critical",
+      "difficulty": 2,
+      "tags": [
+        "reindex",
+        "locks"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-05",
+      "type": "decision",
+      "level": "L3",
+      "question": "Индекс раздулся, нужно перестроить его на нагруженной проде без простоя. Как это сделать и на что обратить внимание?",
+      "context": "Таблица orders активно читается и пишется круглосуточно, останавливать её нельзя.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Использовать `REINDEX INDEX CONCURRENTLY orders_...;` — он держит SHARE UPDATE EXCLUSIVE, поэтому чтение и запись не блокируются. Запускать вне транзакции, по одному ребилду на таблицу, в окно поменьше нагрузки. Заложить время и место: CONCURRENTLY идёт двумя проходами, дольше и временно держит второй индекс на диске. После завершения проверить `pg_index.indisvalid`: если ребилд упал, остался INVALID-индекс — его надо `DROP INDEX CONCURRENTLY` и повторить. Обычный REINDEX здесь нельзя — он заблокирует запись.",
+      "key_points": [
+        "REINDEX INDEX CONCURRENTLY",
+        "вне транзакции, по одному на таблицу",
+        "нужны время и место под второй индекс",
+        "проверить indisvalid после",
+        "обычный REINDEX заблокировал бы запись"
+      ],
+      "common_mistakes": [
+        "Выбрать обычный REINDEX и получить простой",
+        "Не проверить результат на INVALID-индекс"
+      ],
+      "hints": [
+        "Какая блокировка позволяет писать в таблицу во время перестройки?"
+      ],
+      "follow_up": "Чем REINDEX CONCURRENTLY отличается от pg_repack для этой задачи?",
+      "priority": "critical",
+      "difficulty": 3,
+      "tags": [
+        "reindex",
+        "production",
+        "decision"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-06",
+      "type": "debug",
+      "level": "L4",
+      "question": "В плане Index Only Scan, но запрос всё равно медленный. Что не так и как это исправить?",
+      "context": "Запрос по covering-индексу после ночной массовой загрузки данных стал заметно медленнее, хотя план не изменился.",
+      "code": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT user_id, created_at FROM orders WHERE user_id = 42;\n\n Index Only Scan using orders_uid_created_idx on orders\n   (actual time=0.1..92 rows=5000)\n   Heap Fetches: 5000",
+      "code_language": "sql",
+      "expected_answer": "Смотрим на `Heap Fetches: 5000` — на каждую из 5000 строк PostgreSQL всё-таки сходил в таблицу. Причина: после массовой загрузки страницы менялись, и их бит в visibility map сброшен, поэтому Index Only Scan вынужден проверять видимость строк в самой таблице (Heap Fetch). Фактически это обычный Index Scan, выигрыша нет. Исправление: выполнить `VACUUM orders`, чтобы обновить visibility map, и убедиться, что `Heap Fetches` упал к нулю. На постоянно изменяемой таблице — сделать autovacuum агрессивнее.",
+      "key_points": [
+        "Heap Fetches большое = ходим в таблицу",
+        "устаревший visibility map после массовых изменений",
+        "нет выигрыша над Index Scan",
+        "лечится VACUUM / autovacuum-тюнингом"
+      ],
+      "common_mistakes": [
+        "Винить сам индекс и перестраивать его вместо VACUUM",
+        "Игнорировать строку Heap Fetches в плане"
+      ],
+      "hints": [
+        "Что в плане показывает, сколько раз пришлось идти в таблицу?"
+      ],
+      "follow_up": "Почему после массовой загрузки visibility map оказался устаревшим?",
+      "priority": "critical",
+      "difficulty": 4,
+      "tags": [
+        "index-only-scan",
+        "heap-fetches",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-07",
+      "type": "predict",
+      "level": "L4",
+      "question": "Ночной REINDEX INDEX CONCURRENTLY по orders_email_idx прервался. Утром запрос показывает такое. Что это за индекс, использует ли его планировщик и что делать?",
+      "context": null,
+      "code": "SELECT indexrelid::regclass, indisvalid\nFROM pg_index\nWHERE NOT indisvalid;\n\n      indexrelid       | indisvalid\n-----------------------+------------\n orders_email_idx_ccnew| f",
+      "code_language": "sql",
+      "expected_answer": "Это INVALID-индекс — недостроенный остаток прерванного REINDEX CONCURRENTLY (суффикс `_ccnew`, `indisvalid = false`). Планировщик его не использует, потому что считает потенциально неполным, но запись в таблицу его всё равно поддерживает — то есть он только замедляет INSERT/UPDATE, не давая пользы. Что делать: удалить его `DROP INDEX CONCURRENTLY orders_email_idx_ccnew;` (или запустить `REINDEX INDEX CONCURRENTLY orders_email_idx` заново, предварительно разобравшись, почему упало — например, дубликаты для уникального индекса).",
+      "key_points": [
+        "INVALID-индекс от прерванного CONCURRENTLY",
+        "планировщик не использует",
+        "запись его поддерживает — налог без пользы",
+        "DROP INDEX CONCURRENTLY или REINDEX заново"
+      ],
+      "common_mistakes": [
+        "Считать, что индекс рабочий, раз он есть",
+        "Оставить INVALID-индекс висеть"
+      ],
+      "hints": [
+        "О чём говорит суффикс _ccnew и indisvalid = false?"
+      ],
+      "follow_up": "Из-за чего concurrent-ребилд уникального индекса чаще всего падает на втором проходе?",
+      "priority": "important",
+      "difficulty": 4,
+      "tags": [
+        "reindex",
+        "invalid-index",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-08",
+      "type": "debug",
+      "level": "L4",
+      "question": "Таблицу активно обновляли месяц. Тот же запрос по индексу стал вдвое медленнее, хотя индекс на месте и план не изменился. Что произошло и что делать?",
+      "context": "План — прежний Index Scan по тому же индексу; число строк в таблице почти не выросло.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Индекс раздулся (bloat). Месяц UPDATE/DELETE через MVCC копил в индексе мёртвые записи; autovacuum их удалял, но структуру не уплотнял, поэтому страниц B-tree стало больше и на тот же поиск нужно больше I/O — план тот же, а работа больше. Диагностика: сравнить размер индекса (`pg_relation_size`) с ожидаемым, оценить bloat через `pgstattuple`/`pgstatindex`. Лечение: `REINDEX INDEX CONCURRENTLY`. Профилактика: сделать autovacuum на этой таблице агрессивнее и убрать лишние индексы на часто обновляемых колонках, чтобы работал HOT.",
+      "key_points": [
+        "bloat от накопленных мёртвых записей (MVCC)",
+        "autovacuum не уплотняет структуру",
+        "план тот же, но I/O больше",
+        "REINDEX CONCURRENTLY + autovacuum-тюнинг"
+      ],
+      "common_mistakes": [
+        "Искать причину в статистике/плане, хотя план не менялся",
+        "Сразу добавлять новый индекс вместо перестройки существующего"
+      ],
+      "hints": [
+        "Что могло вырасти, если строк столько же, а запрос медленнее?"
+      ],
+      "follow_up": "Как отличить bloat от устаревшей статистики планировщика?",
+      "priority": "critical",
+      "difficulty": 4,
+      "tags": [
+        "bloat",
+        "reindex",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance-q-09",
+      "type": "decision",
+      "level": "L6",
+      "question": "После апгрейда ОС (обновился glibc) в приложении жалуются, что поиск по text-полю иногда «не находит» существующие строки, хотя данные на месте. Что вы заподозрите и как будете действовать?",
+      "context": "Обновляли ОС на всех нодах; ошибок в логах нет, данные в таблице присутствуют.",
+      "code": null,
+      "code_language": null,
+      "expected_answer": "Заподозрю повреждение B-tree из-за смены collation: обновление glibc изменило порядок сортировки строк, а text-индекс отсортирован по старому порядку — двоичный поиск уходит не туда и пропускает строки; уникальный индекс мог бы пропустить дубликат. Порча тихая, без ошибок. Действия: проверить пострадавшие индексы через `amcheck` (`bt_index_check`/`bt_index_parent_check`), перестроить их `REINDEX` (на проде — CONCURRENTLY). На будущее — проверять text-индексы amcheck после апгрейда ОС и по возможности фиксировать версию collation. Trade-off: REINDEX всех text-индексов — заметная разовая работа и I/O, но иначе корректность запросов не гарантирована.",
+      "key_points": [
+        "collation-порча после glibc upgrade",
+        "B-tree по старому порядку сортировки",
+        "тихая порча, без ошибок",
+        "amcheck для проверки, REINDEX для лечения"
+      ],
+      "common_mistakes": [
+        "Искать баг в приложении, а не в индексе",
+        "Не связать «не находит строки» со сменой collation"
+      ],
+      "hints": [
+        "Что общего у всех сломавшихся запросов и что недавно менялось в системе?"
+      ],
+      "follow_up": "Почему та же проблема не затрагивает индексы по числовым колонкам?",
+      "priority": "secondary",
+      "difficulty": 5,
+      "tags": [
+        "collation",
+        "amcheck",
+        "corruption",
+        "tradeoff"
+      ]
+    }
+  ],
+  "worked_examples": [
+    {
+      "id": "postgresql-index-maintenance-we-01",
+      "title": "Раздувшийся индекс на проде: от диагноза до перестройки без простоя",
+      "problem": "Запрос `SELECT ... FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20` за месяц активных изменений вырос со 2 до 20 мс. План прежний — Index Scan по `orders_user_created_idx`, строк в таблице столько же.",
+      "context": null,
+      "solution": {
+        "steps": [
+          "Проверить гипотезу bloat: сравнить `pg_relation_size('orders_user_created_idx')` с ожидаемым размером; при наличии расширения — `SELECT * FROM pgstatindex('orders_user_created_idx');` и посмотреть `avg_leaf_density` (низкая) и `leaf_fragmentation` (высокая).",
+          "Убедиться, что это не устаревшая статистика: план не изменился, оценки строк близки к фактическим — значит дело в физическом размере индекса, а не в выборе плана.",
+          "Перестроить без простоя: `REINDEX INDEX CONCURRENTLY orders_user_created_idx;` — вне транзакции, в окно меньшей нагрузки, по одному ребилду на таблицу.",
+          "После завершения проверить `SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE NOT indisvalid;` — не остался ли INVALID-индекс от возможного сбоя.",
+          "Сравнить размер индекса и время запроса до/после; настроить autovacuum на orders агрессивнее (`autovacuum_vacuum_scale_factor`), чтобы bloat не набегал так быстро."
+        ],
+        "code": null
+      },
+      "why_it_works": "REINDEX строит индекс заново из актуальных строк, укладывая ключи плотно, — исчезают полупустые фрагментированные страницы, индекс уменьшается, на тот же поиск нужно меньше I/O. CONCURRENTLY достигает этого, не блокируя запись, ценой большего времени и временного второго индекса.",
+      "alternatives": [
+        "pg_repack — перестраивает индекс (и таблицу) без долгой блокировки как внешнее расширение; полезно, когда нужно уплотнить и саму таблицу",
+        "Ничего не делать, если bloat мал: перестройка ради единиц процентов не окупается"
+      ],
+      "tradeoffs": [
+        "CONCURRENTLY дольше обычного REINDEX и держит на диске второй индекс на время работы",
+        "Агрессивный autovacuum снижает bloat, но добавляет фоновую нагрузку"
+      ],
+      "common_mistakes": [
+        "Запустить обычный REINDEX и заблокировать запись в orders",
+        "Добавить ещё один индекс вместо перестройки уже существующего",
+        "Не проверить indisvalid после CONCURRENTLY"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "id": "postgresql-index-maintenance-pr-01",
+      "type": "analysis",
+      "title": "Index Only Scan есть, а выигрыша нет",
+      "task": "На таблице `events` (постоянный поток вставок и обновлений) создан covering-индекс `events_uid_idx ON events (user_id) INCLUDE (ts)`. Запрос `SELECT user_id, ts FROM events WHERE user_id = $1` в плане идёт как Index Only Scan, но работает не быстрее обычного Index Scan. `EXPLAIN (ANALYZE)` показывает `Heap Fetches`, сопоставимое с числом возвращаемых строк. Объясни причину и предложи устойчивое решение (не разовый костыль).",
+      "constraints": [
+        "Таблицу останавливать нельзя",
+        "Поток изменений постоянный"
+      ],
+      "expected_output": null,
+      "solution": {
+        "description": "Причина: страницы `events` постоянно меняются, поэтому их бит в visibility map почти всегда сброшен, и Index Only Scan вынужден на каждую строку идти в таблицу проверять видимость (Heap Fetch) — это фактически обычный Index Scan. Разовый `VACUUM` поможет ненадолго: новые изменения снова сбросят биты. Устойчивое решение — настроить autovacuum на events агрессивнее (снизить `autovacuum_vacuum_scale_factor`/`_threshold`), чтобы VACUUM чаще подтверждал страницы all-visible и держал Heap Fetches низким. Стоит трезво оценить, достижим ли здесь стабильный Index Only Scan вообще: на очень горячей таблице он может почти всегда деградировать до Index Scan, и covering-индекс тогда не окупается.",
+        "code": null
+      },
+      "evaluation_points": [
+        "связал Heap Fetches с устаревшим visibility map",
+        "понял, что разовый VACUUM недостаточен на горячей таблице",
+        "предложил тюнинг autovacuum как устойчивое решение",
+        "оценил, что стабильный Index Only Scan на горячей таблице может быть недостижим"
+      ],
+      "difficulty": 4
+    }
+  ],
+  "related_concepts": [
+    {
+      "concept_id": "postgresql-index",
+      "relation": "prerequisite"
+    },
+    {
+      "concept_id": "postgresql-explain",
+      "relation": "related"
+    },
+    {
+      "concept_id": "postgresql-index-types",
+      "relation": "related"
+    }
+  ],
+  "story": {
+    "intro": "Есть таблица `orders` и хороший индекс под частый запрос. Месяц назад запрос летал за пару миллисекунд. Сегодня тот же запрос, тот же план — но вдвое медленнее. Строк в таблице столько же.\n\nПосмотрим, что случилось с индексом за этот месяц, как вернуть ему форму без остановки базы, и почему иногда даже «идеальный» Index Only Scan оказывается медленным.",
+    "beats": [
+      {
+        "problem": "Индекс на месте, план прежний, строк столько же — **почему тот же запрос стал вдвое медленнее?**",
+        "solution": "За месяц таблицу активно обновляли. В PostgreSQL UPDATE не переписывает строку на месте: старая версия остаётся, пишется новая (это MVCC). Обычно новая запись появляется и в индексе, а старая продолжает указывать на мёртвую версию строки. Так в индексе накапливаются мёртвые записи, и он распухает — страниц больше, значит на тот же поиск нужно больше чтений с диска.",
+        "term": "bloat (раздувание индекса)",
+        "analogy": "Записная книжка, куда только дописывают новое и зачёркивают старое, но не переписывают набело: страниц всё больше, а полезного на них — всё меньше."
+      },
+      {
+        "problem": "Но ведь есть autovacuum, он чистит мёртвое. **Почему он не вернул индекс в форму?**",
+        "solution": "Autovacuum действительно удаляет мёртвые записи и помечает освободившееся место как пригодное для новых. Но он не перекладывает дерево заново и не отдаёт место операционной системе — полупустые, фрагментированные страницы так и остаются. Индекс работает, но компактным не становится.",
+        "term": "autovacuum",
+        "analogy": "Из шкафа выкинули хлам, но полки не переставили: место освободилось, а шкаф всё такой же громоздкий."
+      },
+      {
+        "problem": "Значит, надо перестроить индекс с нуля. **Как это сделать?**",
+        "solution": "Есть команда `REINDEX`: она строит индекс заново, укладывая ключи плотно. Bloat исчезает, индекс уменьшается. Проблема одна: обычный REINDEX берёт жёсткую блокировку — на время перестройки в таблицу нельзя писать, да и чтение через этот индекс встаёт.",
+        "term": "REINDEX",
+        "analogy": "Разложить шкаф целиком и собрать заново — но пока разбираешь, шкафом пользоваться нельзя."
+      },
+      {
+        "problem": "На проде таблицу останавливать нельзя. **Как перестроить, не закрывая доступ?**",
+        "solution": "Для этого есть `REINDEX INDEX CONCURRENTLY` (с PostgreSQL 12). Он берёт мягкую блокировку — чтение и запись в таблицу продолжаются. Платит за это временем: делает два прохода по таблице, ждёт старые транзакции и временно держит на диске второй индекс.",
+        "term": "REINDEX INDEX CONCURRENTLY",
+        "analogy": "Ремонт дороги по одной полосе: движение не перекрывают целиком, зато работы идут дольше."
+      },
+      {
+        "problem": "А если такой concurrent-ребилд посреди ночи упадёт — например, наткнётся на дубликат в уникальном индексе? **Что останется?**",
+        "solution": "Останется недостроенный индекс с пометкой `indisvalid = false` (часто с именем на `_ccnew`). Коварство в том, что планировщик его не использует, а вот запись в таблицу его всё равно поддерживает — то есть он только замедляет вставки, не давая пользы. Такой INVALID-индекс надо либо удалить `DROP INDEX`, либо запустить REINDEX CONCURRENTLY заново.",
+        "term": "INVALID-индекс",
+        "analogy": "Недостроенный мост: проехать по нему нельзя, но охрану и содержание он всё равно требует."
+      },
+      {
+        "problem": "Индекс бывает не только раздутым, но и **буквально «побитым» — когда он врёт.** Откуда это берётся?",
+        "solution": "Редко, но случается: сбой хранилища, баг или — частый реальный кейс — смена collation. Обновили ОС, обновился glibc, изменился порядок сортировки строк — а B-tree по text остался отсортирован по-старому. Поиск начинает уходить не туда и «не находить» существующие строки. Ошибок при этом нет, всё тихо. Проверяют такое расширением `amcheck`, лечат тем же REINDEX.",
+        "term": "amcheck; повреждение из-за collation",
+        "analogy": "Телефонный справочник, отсортированный по старым правилам алфавита: буквы вроде на месте, но искать по новым правилам — половину не найдёшь."
+      },
+      {
+        "problem": "Теперь про то, что просили объяснить отдельно. Иногда план показывает **Index Only Scan — «отвечаем прямо из индекса, в таблицу не ходим», — но запрос всё равно медленный.** Как так?",
+        "solution": "Index Only Scan действительно может вернуть данные, не читая таблицу, если все нужные колонки лежат в индексе. Но есть второе условие: индекс не хранит, видима ли версия строки твоей транзакции. Гарантию «на этой странице все строки видимы всем» даёт visibility map, которую заполняет VACUUM. Если страницу меняли после последнего VACUUM, бит сброшен — и PostgreSQL всё равно идёт в таблицу проверить видимость. Это Heap Fetch, и весь выигрыш пропадает.",
+        "term": "Index Only Scan; visibility map; Heap Fetch"
+      },
+      {
+        "problem": "**Как это увидеть и починить?**",
+        "solution": "В `EXPLAIN (ANALYZE)` есть строка `Heap Fetches: N`. Ноль — отвечаем целиком из индекса, всё хорошо. Большое N — значит на каждую строку ходили в таблицу, visibility map устарел. Лечение — `VACUUM` этой таблицы; на постоянно изменяемой таблице — настроить autovacuum агрессивнее, чтобы биты чаще подтверждались.",
+        "term": "Heap Fetches"
+      },
+      {
+        "problem": "**Чем всё это оборачивается на практике?**",
+        "solution": "Индекс — не «создал и забыл». Из-за MVCC он раздувается, из-за collation может испортиться, а Index Only Scan работает ровно настолько, насколько свеж VACUUM. Обслуживание — это REINDEX (на проде CONCURRENTLY) против bloat, amcheck против порчи и правильно настроенный autovacuum, чтобы visibility map оставался свежим.",
+        "term": null
+      }
+    ],
+    "outro": "**Как сказать на интервью:** Из-за MVCC при UPDATE/DELETE в индексе копятся мёртвые записи и он раздувается (bloat): становится больше и читается медленнее. Autovacuum убирает мёртвые кортежи, но структуру не уплотняет — для этого есть REINDEX, а на проде без простоя — REINDEX INDEX CONCURRENTLY (мягкая блокировка, но дольше; прерванный оставляет INVALID-индекс). Отдельно — повреждение из-за смены collation при обновлении glibc: проверяют amcheck, лечат REINDEX. Index Only Scan возвращает данные прямо из индекса, но только если страницы помечены all-visible в visibility map; иначе идёт Heap Fetch в таблицу — в плане это большое `Heap Fetches`, лечится VACUUM. То есть Index Only Scan напрямую зависит от свежести обслуживания."
+  },
+  "short_answer": {
+    "junior": "Индекс — не навсегда «в форме». Со временем от изменений в таблице он «пухнет» (bloat) и начинает работать медленнее; тогда его перестраивают командой REINDEX. Отдельно: Index Only Scan — это когда база отвечает прямо из индекса, не заглядывая в саму таблицу, поэтому быстрее.",
+    "middle": "Из-за MVCC при UPDATE/DELETE в индексе копятся мёртвые записи — индекс раздувается (bloat): больше места, больше I/O, медленнее. Autovacuum чистит мёртвые кортежи, но структуру не уплотняет.\n\nПерестроить индекс — REINDEX. Обычный REINDEX берёт ACCESS EXCLUSIVE и блокирует запись/чтение через индекс. На проде без простоя — `REINDEX INDEX CONCURRENTLY`: мягкая блокировка (SHARE UPDATE EXCLUSIVE), но дольше и не в транзакции.\n\nIndex Only Scan возвращает данные прямо из индекса, если все нужные колонки в нём есть (covering-индекс через INCLUDE) и страница помечена all-visible в visibility map (это подтверждает VACUUM). Иначе — Heap Fetch в таблицу, и выигрыш пропадает.",
+    "senior": "Всё из middle, плюс:\n- HOT update избегает записи в индексы, если изменяемые колонки не проиндексированы и на странице есть место; лишний индекс на горячей колонке ломает HOT и ускоряет bloat.\n- Оценка bloat — `pgstattuple`/`pgstatindex` (avg_leaf_density, leaf_fragmentation) или оценочные запросы; ориентир для REINDEX — ~20-30%.\n- Прерванный REINDEX CONCURRENTLY оставляет INVALID-индекс (`pg_index.indisvalid = false`, `_ccnew`): планировщик его не использует, но запись поддерживает — надо DROP или REINDEX заново.\n- Повреждение индексов: сбой хранилища или смена collation (обновление glibc меняет порядок сортировки → B-tree по text становится некорректным, тихо «не находит» строки). Проверка — amcheck (bt_index_check), лечение — REINDEX. Актуально после pg_upgrade и апгрейда ОС.\n- Диагностика Index Only Scan — строка `Heap Fetches` в `EXPLAIN (ANALYZE)`: большое значение = устаревший visibility map, лечится VACUUM/autovacuum-тюнингом. На очень горячей таблице стабильный Index Only Scan может быть недостижим.",
+    "visuals": {
+      "junior": [
+        {
+          "title": "Index Only Scan: когда идём в таблицу, а когда нет",
+          "mermaid": "flowchart TD\n  S[\"Запрос: нужны только колонки из индекса\"]\n  S --> F[\"Нашли запись в индексе\"]\n  F --> V{\"Бит в visibility map<br/>выставлен?\"}\n  V -->|\"да\"| I[\"Вернуть данные из индекса<br/>Heap Fetches: 0\"]\n  V -->|\"нет\"| H[\"Heap Fetch: идём в таблицу<br/>проверить видимость строки\"]\n  H --> N[\"Выигрыша нет —<br/>по сути обычный Index Scan\"]",
+          "caption": "Index Only Scan быстрый, только если VACUUM отметил страницы как all-visible. Иначе всё равно читаем таблицу."
+        }
+      ],
+      "middle": [
+        {
+          "title": "Жизненный цикл индекса: bloat и REINDEX",
+          "mermaid": "flowchart TD\n  A[\"CREATE INDEX<br/>индекс компактный\"]\n  A --> B[\"UPDATE/DELETE<br/>MVCC копит мёртвые записи\"]\n  B --> C[\"bloat: индекс раздут,<br/>больше I/O, медленнее\"]\n  C --> D{\"bloat выше ~20%?\"}\n  D -->|\"нет\"| B\n  D -->|\"да\"| E[\"REINDEX INDEX CONCURRENTLY<br/>перестроить без простоя\"]\n  E --> A",
+          "caption": "Обычная работа медленно раздувает индекс; REINDEX возвращает его в компактную форму. Autovacuum сам bloat не убирает."
+        }
+      ],
+      "senior": [
+        {
+          "title": "Как перестроить индекс: дерево решения",
+          "mermaid": "flowchart TD\n  Q[\"Нужно перестроить индекс\"]\n  Q --> D{\"Можно простой<br/>таблицы?\"}\n  D -->|\"да\"| R1[\"REINDEX INDEX<br/>ACCESS EXCLUSIVE, быстрее\"]\n  D -->|\"нет (прод)\"| R2[\"REINDEX INDEX CONCURRENTLY<br/>читаем и пишем дальше\"]\n  R2 --> C{\"Ребилд<br/>прервался?\"}\n  C -->|\"нет\"| OK[\"Индекс компактный\"]\n  C -->|\"да\"| INV[\"INVALID индекс<br/>indisvalid = false\"]\n  INV --> F[\"DROP INDEX<br/>или REINDEX CONCURRENTLY заново\"]",
+          "caption": "На проде почти всегда CONCURRENTLY; после него обязательно проверить, не остался ли INVALID-индекс."
+        }
+      ]
+    }
+  }
+}

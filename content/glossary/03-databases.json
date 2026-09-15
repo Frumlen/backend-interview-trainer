@@ -308,6 +308,121 @@
       ],
       "definition": "Накопительная сумма по порядку строк: `SUM(x) OVER (ORDER BY ...)`. Без ORDER BY в окне получается сумма по всему разделу, а не накопление.",
       "concept_id": "sql-window-functions"
+    },
+    {
+      "term": "cost",
+      "aliases": [
+        "стоимость",
+        "оценочная стоимость"
+      ],
+      "definition": "Оценка стоимости плана в условных единицах планировщика (чтение страниц плюс обработка строк), а не миллисекунды. Планировщик выбирает план с наименьшим cost.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "autovacuum",
+      "aliases": [
+        "autoanalyze",
+        "автовакуум"
+      ],
+      "definition": "Фоновый процесс PostgreSQL, который чистит мёртвые версии строк и обновляет статистику (autoanalyze). Если он не успевает, статистика устаревает и планы портятся.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "extended statistics",
+      "aliases": [
+        "расширенная статистика",
+        "CREATE STATISTICS"
+      ],
+      "definition": "Дополнительная статистика по нескольким колонкам (`CREATE STATISTICS`), которая учит планировщик зависимости между ними. Нужна, когда обычная оценка занижена из-за связанных условий.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "generic plan",
+      "aliases": [
+        "generic-план",
+        "общий план"
+      ],
+      "definition": "План подготовленного запроса, построенный без учёта конкретных значений параметров, по средней селективности. Экономит планирование, но плох для перекошенных данных.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "custom plan",
+      "aliases": [
+        "custom-план"
+      ],
+      "definition": "План подготовленного запроса, построенный под конкретные значения параметров. Точнее generic, но требует планирования при каждом выполнении.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "geqo",
+      "aliases": [
+        "генетический оптимизатор",
+        "genetic query optimization"
+      ],
+      "definition": "Генетический оптимизатор порядка соединения: включается, когда таблиц в запросе больше порога (по умолчанию 12), и ищет хороший порядок JOIN, не перебирая все варианты.",
+      "concept_id": "postgresql-query-planner"
+    },
+    {
+      "term": "bloat",
+      "aliases": [
+        "раздувание"
+      ],
+      "definition": "Рост размера индекса из-за накопленных мёртвых записей (MVCC): индекс занимает больше места и читается медленнее, чем нужно по числу строк.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "REINDEX",
+      "aliases": [],
+      "definition": "Команда, перестраивающая индекс с нуля; обычный REINDEX берёт ACCESS EXCLUSIVE и блокирует запись в таблицу и чтение через этот индекс.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "REINDEX CONCURRENTLY",
+      "aliases": [],
+      "definition": "Перестройка индекса без простоя (с PostgreSQL 12): берёт SHARE UPDATE EXCLUSIVE, чтение и запись продолжаются; дольше, не выполняется внутри транзакции.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "invalid index",
+      "aliases": [
+        "INVALID-индекс"
+      ],
+      "definition": "Недостроенный индекс (pg_index.indisvalid = false), например после прерванного REINDEX CONCURRENTLY; планировщик его не использует, но запись его поддерживает.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "HOT update",
+      "aliases": [],
+      "definition": "Оптимизация UPDATE: если изменяемые колонки не входят ни в один индекс и на странице есть место, новая версия строки живёт на той же странице и индексы не обновляются.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "visibility map",
+      "aliases": [
+        "карта видимости"
+      ],
+      "definition": "Служебная структура, где VACUUM отмечает страницы, все строки которых видимы всем транзакциям (all-visible); нужна для Index Only Scan.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "heap fetch",
+      "aliases": [
+        "Heap Fetches"
+      ],
+      "definition": "Обращение Index Only Scan к самой таблице, чтобы проверить видимость строки, когда бит в visibility map не выставлен; в плане — строка Heap Fetches: N.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "amcheck",
+      "aliases": [],
+      "definition": "Расширение для проверки целостности индексов (bt_index_check); выявляет повреждения, например из-за смены collation.",
+      "concept_id": "postgresql-index-maintenance"
+    },
+    {
+      "term": "pgstattuple",
+      "aliases": [],
+      "definition": "Расширение для оценки bloat; pgstatindex показывает avg_leaf_density и leaf_fragmentation.",
+      "concept_id": "postgresql-index-maintenance"
     }
   ]
 }

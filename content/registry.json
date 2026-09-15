@@ -14,8 +14,10 @@
       "postgresql-index-types",
       "postgresql-composite-index",
       "postgresql-index-not-used",
+      "postgresql-index-maintenance",
       "postgresql-explain",
       "postgresql-slow-query",
+      "postgresql-query-planner",
       "sql-join",
       "sql-group-by",
       "sql-window-functions"
@@ -507,6 +509,28 @@
       "parent_id": null,
       "prerequisites": [
         "sql-group-by"
+      ]
+    },
+    {
+      "id": "postgresql-query-planner",
+      "title": "Оптимизатор запросов (планировщик)",
+      "domain": "Базы данных / Медленный запрос",
+      "level": "L4",
+      "order": 265,
+      "parent_id": null,
+      "prerequisites": [
+        "postgresql-explain"
+      ]
+    },
+    {
+      "id": "postgresql-index-maintenance",
+      "title": "Обслуживание индексов: bloat, REINDEX, Index Only Scan",
+      "domain": "Базы данных / Индексы",
+      "level": "L4",
+      "order": 245,
+      "parent_id": "postgresql-index",
+      "prerequisites": [
+        "postgresql-index"
       ]
     }
   ]
